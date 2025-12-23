@@ -1,3 +1,6 @@
+dist/
+build/
+BookStats.spec
 .covers_cache/
 .DS_Store
 __pycache__/
