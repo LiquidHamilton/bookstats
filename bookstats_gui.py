@@ -63,6 +63,9 @@ except Exception:
 # Settings (persisted to JSON)
 # ----------------------------
 
+APP_NAME = "BookStats"
+APP_AUTHOR = "KyleCarroll"
+
 _DEFAULT_SETTINGS = {
     "covers_enabled": True,
     "auto_load_last_file": True,
@@ -73,11 +76,10 @@ _DEFAULT_SETTINGS = {
     "library_column_order": [],
 }
 
-def _settings_path(app_dir: str) -> str:
-    return os.path.join(app_dir, "bookstats_settings.json")
-
-def load_settings(app_dir: str) -> Dict[str, Any]:
-    path = _settings_path(app_dir)
+def _settings_path(settings_dir: str) -> str:
+    return os.path.join(settings_dir, "bookstats_settings.json")
+def load_settings(settings_dir: str) -> Dict[str, Any]:
+    path = _settings_path(settings_dir)
     if not os.path.exists(path):
         return dict(_DEFAULT_SETTINGS)
     try:
@@ -91,8 +93,8 @@ def load_settings(app_dir: str) -> Dict[str, Any]:
     except Exception:
         return dict(_DEFAULT_SETTINGS)
 
-def save_settings(app_dir: str, settings: Dict[str, Any]) -> None:
-    path = _settings_path(app_dir)
+def save_settings(settings_dir: str, settings: Dict[str, Any]) -> None:
+    path = _settings_path(settings_dir)
     tmp = path + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
@@ -109,6 +111,28 @@ def save_settings(app_dir: str, settings: Dict[str, Any]) -> None:
 # ----------------------------
 # Data model + parsing helpers
 # ----------------------------
+
+def get_app_dirs(app_dir: str) -> tuple[str, str]:
+    """
+    Return (data_dir, cache_dir) in a location that is writable in packaged apps.
+
+    - data_dir: user-specific persistent data (settings, last-opened file)
+    - cache_dir: user-specific cache (cover images)
+
+    Falls back to app_dir if platformdirs isn't available.
+    """
+    try:
+        from platformdirs import user_data_dir, user_cache_dir  # type: ignore
+        data_dir = user_data_dir(APP_NAME, APP_AUTHOR)
+        cache_dir = user_cache_dir(APP_NAME, APP_AUTHOR)
+    except Exception:
+        data_dir = app_dir
+        cache_dir = os.path.join(app_dir, ".cache")
+
+    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(cache_dir, exist_ok=True)
+    return data_dir, cache_dir
+
 
 def _as_list(v: Any) -> List[Any]:
     if v is None:
@@ -394,16 +418,17 @@ class BookStatsApp(tk.Tk):
         self.geometry("1220x760")
         self.minsize(980, 620)
 
-        # App directory + settings
+        # App directory + writable data/cache directories (packaging-friendly)
         self.app_dir = os.path.dirname(os.path.abspath(__file__))
-        self.settings: Dict[str, Any] = load_settings(self.app_dir)
+        self.data_dir, self.cache_dir = get_app_dirs(self.app_dir)
+        self.settings: Dict[str, Any] = load_settings(self.data_dir)
 
         # Cover cache (Open Library by ISBN via cover_cache.py)
         self.covers_available = bool(_HAS_PIL and _HAS_COVER_CACHE)
         self.covers_enabled = bool(self.settings.get("covers_enabled", True)) and self.covers_available
         self.cover_cache = None
         if self.covers_enabled and CoverCache:
-            cache_dir = os.path.join(self.app_dir, ".covers_cache")
+            cache_dir = os.path.join(self.cache_dir, "covers")
             try:
                 self.cover_cache = CoverCache(cache_dir=cache_dir)
             except Exception:
@@ -550,7 +575,7 @@ class BookStatsApp(tk.Tk):
                 pass
 
         def do_clear_cover_cache():
-            cache_dir = os.path.join(self.app_dir, ".covers_cache")
+            cache_dir = os.path.join(self.cache_dir, "covers")
             try:
                 if os.path.isdir(cache_dir):
                     for fn in os.listdir(cache_dir):
@@ -588,7 +613,7 @@ class BookStatsApp(tk.Tk):
             self.settings["covers_enabled"] = bool(covers_var.get())
             self.settings["auto_load_last_file"] = bool(auto_load_var.get())
 
-            save_settings(self.app_dir, self.settings)
+            save_settings(self.data_dir, self.settings)
             self.apply_library_column_settings()
 
             # Refresh cover state
@@ -603,7 +628,7 @@ class BookStatsApp(tk.Tk):
         self.covers_enabled = bool(self.settings.get("covers_enabled", True)) and self.covers_available
         if self.covers_enabled and (self.cover_cache is None) and CoverCache:
             try:
-                cache_dir = os.path.join(self.app_dir, ".covers_cache")
+                cache_dir = os.path.join(self.cache_dir, "covers")
                 self.cover_cache = CoverCache(cache_dir=cache_dir)
             except Exception:
                 self.cover_cache = None
@@ -884,7 +909,7 @@ class BookStatsApp(tk.Tk):
         if not (isinstance(self.settings.get("library_visible_columns"), list) and self.settings.get("library_visible_columns")):
             self.settings["library_visible_columns"] = list(displaycols)
 
-        save_settings(self.app_dir, self.settings)
+        save_settings(self.data_dir, self.settings)
 
         # Re-populate to match new order
         self._populate_tree(self.filtered_books)
@@ -1085,7 +1110,7 @@ class BookStatsApp(tk.Tk):
                     pass
         if not live_only:
             self.settings["library_column_widths"] = self._get_current_column_widths()
-            save_settings(self.app_dir, self.settings)
+            save_settings(self.data_dir, self.settings)
 
     def _on_tree_any_button_release(self, _event):
         """Catch column resize events and persist widths with a small debounce."""
@@ -1109,7 +1134,7 @@ class BookStatsApp(tk.Tk):
                 pass
 
         def commit():
-            save_settings(self.app_dir, self.settings)
+            save_settings(self.data_dir, self.settings)
 
         self._width_save_after_id = self.after(600, commit)
 
@@ -1703,7 +1728,7 @@ class BookStatsApp(tk.Tk):
 
             # Persist last opened file
             self.settings["last_opened_path"] = path
-            save_settings(self.app_dir, self.settings)
+            save_settings(self.data_dir, self.settings)
 
             # Default sort state (Author last name)
             self.sort_col = "Author"

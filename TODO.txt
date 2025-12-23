@@ -1,0 +1,13 @@
+Make it import from other places, like Goodreads.
+Allow user created entries/edit entries.
+
+To make an executable:
+
+pyinstaller \
+  --noconsole \
+  --windowed \
+  --name "BookStats" \
+  --onedir \
+  --osx-bundle-identifier "com.kylecarroll.bookstats" \
+  bookstats_gui_v7.py
+
