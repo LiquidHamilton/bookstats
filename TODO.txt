@@ -1,13 +1,13 @@
 Make it import from other places, like Goodreads.
 Allow user created entries/edit entries.
-Add app icon
 
 To make an executable:
 
 python -m PyInstaller --clean --noconfirm --onedir --windowed --name BookStats \
+  --icon bookstats-icon.icns \
   --collect-all matplotlib \
   --hidden-import tkinter \
   --hidden-import _tkinter \
   --hidden-import matplotlib.backends.backend_tkagg \
   --hidden-import matplotlib.backends._tkagg \
-  bookstats_gui_v9.py
+  bookstats_gui.py

@@ -68,6 +68,7 @@ APP_AUTHOR = "KyleCarroll"
 
 _DEFAULT_SETTINGS = {
     "covers_enabled": True,
+    "auto_fill_summary": True,
     "auto_load_last_file": True,
     "last_opened_path": "",
     # Library columns: visibility + order (Treeview displaycolumns)
@@ -114,20 +115,44 @@ def save_settings(settings_dir: str, settings: Dict[str, Any]) -> None:
 
 def get_app_dirs(app_dir: str) -> tuple[str, str]:
     """
-    Return (data_dir, cache_dir) in a location that is writable in packaged apps.
+    Return (data_dir, cache_dir) in a location that is writable and persistent.
 
     - data_dir: user-specific persistent data (settings, last-opened file)
     - cache_dir: user-specific cache (cover images)
 
-    Falls back to app_dir if platformdirs isn't available.
+    Prefers platformdirs when available. If not, uses OS-specific user folders.
+    If a legacy settings file or legacy .cache folder exists next to the script,
+    continue using those to avoid breaking existing installs.
     """
+    # Legacy (older builds): store next to the script folder.
+    legacy_settings = os.path.join(app_dir, "bookstats_settings.json")
+    legacy_cache = os.path.join(app_dir, ".cache")
+
     try:
         from platformdirs import user_data_dir, user_cache_dir  # type: ignore
         data_dir = user_data_dir(APP_NAME, APP_AUTHOR)
         cache_dir = user_cache_dir(APP_NAME, APP_AUTHOR)
     except Exception:
-        data_dir = app_dir
-        cache_dir = os.path.join(app_dir, ".cache")
+        # If we already have a legacy install, keep using it.
+        if os.path.exists(legacy_settings) or os.path.isdir(legacy_cache):
+            data_dir = app_dir
+            cache_dir = legacy_cache
+        else:
+            home = os.path.expanduser("~")
+
+            if sys.platform.startswith("win"):
+                appdata = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or home
+                localappdata = os.environ.get("LOCALAPPDATA") or appdata
+                data_dir = os.path.join(appdata, APP_NAME)
+                cache_dir = os.path.join(localappdata, APP_NAME, "Cache")
+            elif sys.platform == "darwin":
+                data_dir = os.path.join(home, "Library", "Application Support", APP_NAME)
+                cache_dir = os.path.join(home, "Library", "Caches", APP_NAME)
+            else:
+                xdg_data = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+                xdg_cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
+                data_dir = os.path.join(xdg_data, APP_NAME)
+                cache_dir = os.path.join(xdg_cache, APP_NAME)
 
     os.makedirs(data_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
@@ -154,6 +179,23 @@ def _safe_float(v: Any) -> Optional[float]:
         return float(v)
     except Exception:
         return None
+
+
+def _safe_bool(v: Any) -> bool:
+    """Best-effort boolean parse for JSON fields."""
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return v != 0
+    s = str(v).strip().lower()
+    if s in {"1", "true", "yes", "y", "t"}:
+        return True
+    if s in {"0", "false", "no", "n", "f", ""}:
+        return False
+    # Fallback: non-empty strings count as True
+    return True
 
 
 def _digits_to_int(v: Any) -> Optional[int]:
@@ -254,6 +296,7 @@ class Book:
     isbn: str = ""
     publication: str = ""
     summary: str = ""
+    summary_checked: bool = False
 
     @property
     def display_author(self) -> str:
@@ -385,6 +428,7 @@ def parse_books(data: Dict[str, Any]) -> List[Book]:
             entrydate=str(raw.get("entrydate") or "").strip() or None,
             publication=str(raw.get("publication") or "").strip(),
             summary=str(raw.get("summary") or "").strip(),
+            summary_checked=_safe_bool(raw.get("summary_checked")),
         )
         books.append(book)
 
@@ -1196,6 +1240,7 @@ class BookStatsApp(tk.Tk):
         self.random_result.pack(fill="both", expand=True)
 
         self._random_current_book: Optional[Book] = None
+        self._random_last_pool_size: Optional[int] = None
         self.random_result.configure(state="disabled")
 
     def _selected_collections(self) -> List[str]:
@@ -1236,12 +1281,14 @@ class BookStatsApp(tk.Tk):
         pool = self._random_pool()
         if not pool:
             self._random_current_book = None
+            self._random_last_pool_size = None
             self._clear_cover_label(getattr(self, "random_cover_label", None), key="random")
             self._set_random_text("No matching books for your filters.")
             return
         b = random.choice(pool)
         self._random_current_book = b
-        self._set_cover_label_for_book(getattr(self, "random_cover_label", None), b, key="random")
+        self._random_last_pool_size = len(pool)
+        self._set_cover_label_for_book(getattr(self, "random_cover_label", None), b, key="random", details_text=getattr(self, "random_result", None))
         self._set_random_text(self._book_text(b, pool_size=len(pool)))
 
     def _set_random_text(self, s: str):
@@ -1806,7 +1853,7 @@ class BookStatsApp(tk.Tk):
         txt.insert("1.0", self._book_text(b))
         txt.configure(state="disabled")
 
-        self._set_cover_label_for_book(cover_lbl, b, key=f"details:{b.books_id}:{id(win)}")
+        self._set_cover_label_for_book(cover_lbl, b, key=f"details:{b.books_id}:{id(win)}", details_text=txt)
 
     # ----- Covers -----
 
@@ -1822,20 +1869,118 @@ class BookStatsApp(tk.Tk):
         if key in self._img_refs:
             self._img_refs.pop(key, None)
 
-    def _set_cover_label_for_book(self, label: Optional[ttk.Label], b: Book, key: str):
+    def _maybe_persist_summary(self, book: Book, new_summary: str) -> None:
+        """
+        If enabled and the book's summary is empty, save a fetched summary back
+        into the currently loaded JSON file (and update the in-memory Book).
+
+        Creates a one-time .bak backup alongside the JSON before first write.
+        """
+        try:
+            if not self.settings.get("auto_fill_summary", True):
+                return
+            if not new_summary:
+                return
+            if (book.summary or "").strip():
+                return
+            if not self.current_path:
+                return
+
+            book.summary = new_summary.strip()
+            book.summary_checked = True
+
+            path = self.current_path
+            backup = path + ".bak"
+            if (not os.path.exists(backup)) and os.path.exists(path):
+                try:
+                    import shutil
+                    shutil.copy2(path, backup)
+                except Exception:
+                    pass
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+
+            key = str(book.books_id)
+            raw = data.get(key)
+            if isinstance(raw, dict) and (not str(raw.get("summary") or "").strip()):
+                raw["summary"] = book.summary
+                raw["summary_checked"] = True
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            return
+
+    def _maybe_mark_summary_checked(self, book: Book) -> None:
+        """Persist a 'summary_checked' marker so we don't repeatedly ping the server
+        when no summary is available for a given book."""
+        try:
+            if not self.settings.get("auto_fill_summary", True):
+                return
+            if (book.summary or "").strip():
+                # If summary exists, _maybe_persist_summary handles persistence.
+                return
+            if getattr(book, "summary_checked", False):
+                return
+            if not self.current_path:
+                return
+
+            book.summary_checked = True
+            path = self.current_path
+            backup = path + ".bak"
+            if (not os.path.exists(backup)) and os.path.exists(path):
+                try:
+                    import shutil
+                    shutil.copy2(path, backup)
+                except Exception:
+                    pass
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+
+            key = str(book.books_id)
+            raw = data.get(key)
+            if isinstance(raw, dict):
+                raw["summary_checked"] = True
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            return
+
+
+    def _set_cover_label_for_book(self, label: Optional[ttk.Label], b: Book, key: str, details_text: Optional[tk.Text] = None):
         if label is None:
             return
         if not self.covers_enabled or not self.cover_cache:
             label.configure(text="")
             return
         isbn = (b.isbn or "").strip()
-        if not isbn:
-            label.configure(text="(No ISBN)")
-            label.configure(image="")
-            return
-        self._set_cover_label_for_isbn(label, isbn, key=key, title=b.title, author=b.display_author)
+        # Even if ISBN is missing, cover_cache can fall back to title/author search.
+        self._set_cover_label_for_isbn(
+            label,
+            isbn,
+            key=key,
+            title=b.title,
+            author=b.display_author,
+            book=b,
+            details_text=details_text,
+        )
 
-    def _set_cover_label_for_isbn(self, label: ttk.Label, isbn: str, key: str, title: str = "", author: str = ""):
+
+    def _set_cover_label_for_isbn(
+        self,
+        label: ttk.Label,
+        isbn: str,
+        key: str,
+        title: str = "",
+        author: str = "",
+        book: Optional[Book] = None,
+        details_text: Optional[tk.Text] = None,
+    ):
         if not self.covers_enabled or not self.cover_cache:
             label.configure(text="")
             return
@@ -1845,8 +1990,52 @@ class BookStatsApp(tk.Tk):
         if hasattr(label, "image"):
             label.image = None
 
-        def on_done(path: Optional[str]):
+        def on_done_extras(extras: Any):
+            # extras can be either a dict {"path": ..., "summary": ...} or a raw path
+            path: Optional[str] = None
+            summary: str = ""
+            if isinstance(extras, dict):
+                path = extras.get("path")
+                summary = str(extras.get("summary") or "")
+            else:
+                path = extras
+
             def apply_on_ui_thread():
+                # Persist summary even if there is no cover image or Pillow isn't installed.
+                try:
+                    if book is not None and summary:
+                        self._maybe_persist_summary(book, summary)
+                except Exception:
+                    pass
+
+                # If we asked for a summary but the source had none, mark it as checked
+                # so we don't keep pinging the server on every open.
+                try:
+                    if book is not None and want_summary and (not str(summary).strip()):
+                        self._maybe_mark_summary_checked(book)
+                except Exception:
+                    pass
+
+                # If this cover load is tied to an open Book Details window, refresh its text
+                # so the newly saved summary appears immediately.
+                try:
+                    if book is not None and details_text is not None and details_text.winfo_exists() and want_summary:
+                        y = details_text.yview()
+                        details_text.configure(state="normal")
+                        details_text.delete("1.0", "end")
+                        if key == "random" and getattr(self, "_random_last_pool_size", None) is not None:
+                            details_text.insert("1.0", self._book_text(book, pool_size=getattr(self, "_random_last_pool_size")))
+                        else:
+                            details_text.insert("1.0", self._book_text(book))
+                        details_text.configure(state="disabled")
+                        if isinstance(y, tuple) and y:
+                            details_text.yview_moveto(y[0])
+                except Exception:
+                    pass
+
+                if not label.winfo_exists():
+                    return
+
                 if not path or not os.path.exists(path):
                     label.configure(text="(No cover found)", image="")
                     return
@@ -1868,9 +2057,32 @@ class BookStatsApp(tk.Tk):
             self.after(0, apply_on_ui_thread)
 
         try:
-            self.cover_cache.fetch_async(isbn, "L", on_done, title=title, author=author)
+            want_summary = bool(
+                book is not None
+                and (not (book.summary or "").strip())
+                and (not getattr(book, "summary_checked", False))
+                and self.settings.get("auto_fill_summary", True)
+            )
+
+            # Prefer the richer API if available (supports ISBN + title/author fallback + summary)
+            if hasattr(self.cover_cache, "fetch_async_extras"):
+                self.cover_cache.fetch_async_extras(  # type: ignore
+                    isbn=isbn,
+                    size="L",
+                    title=title,
+                    author=author,
+                    want_summary=want_summary,
+                    on_done=on_done_extras,
+                )
+            else:
+                # Back-compat
+                try:
+                    self.cover_cache.fetch_async(isbn, "L", on_done_extras, title=title, author=author)  # type: ignore
+                except TypeError:
+                    self.cover_cache.fetch_async(isbn, "L", on_done_extras)  # type: ignore
         except Exception:
             label.configure(text="(Cover fetch failed)", image="")
+
 
     def show_cover_help(self):
         msg = (
@@ -1934,7 +2146,8 @@ class BookStatsApp(tk.Tk):
             "• Sortable library view\n"
             "• Random picker with collection filters\n"
             "• Statistics + charts (if matplotlib installed)\n\n"
-            "Tip: use Library → column headers to sort."
+            "Tip: use Library → column headers to sort.\n\n"
+            "Version 1.0.1"
         )
         messagebox.showinfo("About", msg)
 
