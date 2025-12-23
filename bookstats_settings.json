@@ -1,0 +1,38 @@
+{
+  "covers_enabled": true,
+  "auto_load_last_file": true,
+  "last_opened_path": "librarything_kylecarroll.json",
+  "library_visible_columns": [
+    "Title",
+    "Author",
+    "Year",
+    "Pages",
+    "Rating",
+    "Format",
+    "Tags",
+    "Collections",
+    "Genres"
+  ],
+  "library_column_order": [
+    "Title",
+    "Author",
+    "Year",
+    "Pages",
+    "Rating",
+    "Format",
+    "Tags",
+    "Collections",
+    "Genres"
+  ],
+  "library_column_widths": {
+    "Title": 266,
+    "Author": 136,
+    "Year": 70,
+    "Pages": 70,
+    "Rating": 70,
+    "Format": 115,
+    "Tags": 135,
+    "Collections": 185,
+    "Genres": 186
+  }
+}
