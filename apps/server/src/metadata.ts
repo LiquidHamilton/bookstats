@@ -19,7 +19,7 @@ const GOOGLE_BOOKS_API = "https://www.googleapis.com/books/v1";
 const HARDCOVER_API = "https://api.hardcover.app/v1/graphql";
 const OPEN_LIBRARY_API = "https://openlibrary.org";
 
-const metadataUserAgent = () => process.env.BOOKSTATS_METADATA_USER_AGENT ?? "BookStats/1.1.0 (local-development)";
+const metadataUserAgent = () => process.env.BOOKSTATS_METADATA_USER_AGENT ?? "BookStats/1.1.1 (local-development)";
 const googleKey = () => process.env.BOOKSTATS_GOOGLE_BOOKS_API_KEY?.trim();
 const hardcoverToken = () => process.env.BOOKSTATS_HARDCOVER_API_TOKEN?.trim();
 

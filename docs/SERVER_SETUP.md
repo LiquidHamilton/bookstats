@@ -20,7 +20,7 @@ The production `/opt/bookstats/.env` should contain at least:
 BOOKSTATS_HOST=127.0.0.1
 BOOKSTATS_PORT=8790
 DATABASE_URL=postgresql://bookstats:CHANGE_ME@127.0.0.1:5432/bookstats
-BOOKSTATS_METADATA_USER_AGENT=BookStats/1.1.0 (your-real-contact@example.com)
+BOOKSTATS_METADATA_USER_AGENT=BookStats/1.1.1 (your-real-contact@example.com)
 BOOKSTATS_CORS_ORIGIN=https://kylecarroll.com,tauri://localhost,http://tauri.localhost
 # HTTP(S) origins automatically allow their matching www/non-www counterpart.
 BOOKSTATS_PUBLIC_URL=https://kylecarroll.com/bookstats/
@@ -231,8 +231,8 @@ sudo systemctl enable --now bookstats
 Local `export.sh` produces matching server/web ZIPs:
 
 ```text
-BookStats-Web-v1.1.0.zip
-BookStats-Server-v1.1.0.zip
+BookStats-Web-v1.1.1.zip
+BookStats-Server-v1.1.1.zip
 ```
 
 A signed desktop build also produces a deployment wrapper such as:

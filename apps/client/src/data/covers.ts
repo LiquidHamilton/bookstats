@@ -1,4 +1,4 @@
-import { cloudCoverUrl } from "./api";
+import { cloudCoverUrl, fetchCatalogCoverForInspection } from "./api";
 
 const MAX_WIDTH = 700;
 const MAX_HEIGHT = 1050;
@@ -89,17 +89,27 @@ export async function filterUsableCoverUrls(values: string[]): Promise<string[]>
 async function coverUrlLooksUsable(url: string): Promise<boolean> {
   if (PLACEHOLDER_URL_PATTERN.test(safeDecodedUrl(url))) return false;
   if (!/^https?:\/\//i.test(url)) return true;
-  try {
-    const response = await fetch(url, { cache: "force-cache" });
-    if (!response.ok) return false;
-    const blob = await response.blob();
-    if (!blob.type.startsWith("image/")) return false;
-    return imageBlobLooksUsable(blob);
-  } catch {
-    // Some cover hosts allow <img> display while blocking fetch() with CORS. Do not
-    // discard a potentially valid cover solely because it cannot be inspected.
-    return true;
+
+  // Third-party cover hosts commonly allow <img> display while blocking browser fetch()
+  // with CORS. In that case the old validator had to accept the image without looking at
+  // it, which is why catalog placeholders still leaked into the picker. Ask the BookStats
+  // server to safely fetch the same public image so the browser can inspect its pixels.
+  let blob = await fetchCatalogCoverForInspection(url);
+  if (!blob) {
+    // Keep a direct fallback for local/dev servers that have not yet been upgraded.
+    try {
+      const response = await fetch(url, { cache: "force-cache" });
+      if (!response.ok) return false;
+      const direct = await response.blob();
+      if (!direct.type.startsWith("image/")) return false;
+      blob = direct;
+    } catch {
+      // Cover choices are optional. If BookStats cannot validate one, omit it rather than
+      // showing a broken/placeholder candidate to the user.
+      return false;
+    }
   }
+  return imageBlobLooksUsable(blob);
 }
 
 function safeDecodedUrl(url: string): string {
@@ -110,10 +120,14 @@ async function imageBlobLooksUsable(blob: Blob): Promise<boolean> {
   const objectUrl = URL.createObjectURL(blob);
   try {
     const image = await loadImage(objectUrl);
-    if (image.naturalWidth < 2 || image.naturalHeight < 2) return false;
+    // Catalog thumbnails smaller than this are almost always missing-image shims, tracking
+    // pixels, or provider placeholders rather than usable cover artwork.
+    if (image.naturalWidth < 48 || image.naturalHeight < 64) return false;
+    const aspect = image.naturalWidth / image.naturalHeight;
+    if (aspect < 0.35 || aspect > 1.15) return false;
 
-    const width = 32;
-    const height = 48;
+    const width = 40;
+    const height = 56;
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
@@ -122,23 +136,47 @@ async function imageBlobLooksUsable(blob: Blob): Promise<boolean> {
     context.drawImage(image, 0, 0, width, height);
     const pixels = context.getImageData(0, 0, width, height).data;
     let nearWhite = 0;
-    let nonWhite = 0;
+    let nearGray = 0;
+    let colorful = 0;
     let dark = 0;
+    let luminanceSum = 0;
+    let luminanceSquaredSum = 0;
     const total = width * height;
     for (let index = 0; index < pixels.length; index += 4) {
       const red = pixels[index];
       const green = pixels[index + 1];
       const blue = pixels[index + 2];
+      const maximum = Math.max(red, green, blue);
+      const minimum = Math.min(red, green, blue);
+      const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+      luminanceSum += luminance;
+      luminanceSquaredSum += luminance * luminance;
       if (red >= 242 && green >= 242 && blue >= 242) nearWhite += 1;
-      else nonWhite += 1;
-      if (red <= 205 && green <= 205 && blue <= 205) dark += 1;
+      if (maximum - minimum <= 8) nearGray += 1;
+      if (maximum - minimum >= 24) colorful += 1;
+      if (luminance <= 155) dark += 1;
     }
     const whiteRatio = nearWhite / total;
-    const nonWhiteRatio = nonWhite / total;
+    const grayRatio = nearGray / total;
+    const colorfulRatio = colorful / total;
     const darkRatio = dark / total;
-    // Blank files are almost entirely white. Common “Image Not Available” cards are
-    // similarly white with only a small amount of dark text/icon artwork.
-    return !(whiteRatio >= 0.93 && nonWhiteRatio <= 0.07 && darkRatio <= 0.05);
+    const meanLuminance = luminanceSum / total;
+    const variance = Math.max(0, luminanceSquaredSum / total - meanLuminance * meanLuminance);
+    const luminanceDeviation = Math.sqrt(variance);
+
+    // Completely blank/near-blank files.
+    if (whiteRatio >= 0.965) return false;
+
+    // Provider "Image Not Available" cards are generally bright, almost entirely grayscale
+    // and contain only a small amount of dark text/iconography. This deliberately requires
+    // all of those signals together so real light-colored covers are retained.
+    if (whiteRatio >= 0.78 && grayRatio >= 0.94 && colorfulRatio <= 0.012 && darkRatio <= 0.12 && meanLuminance >= 220) return false;
+
+    // Flat gray/white placeholder tiles that do not contain enough visual information to be
+    // useful as cover art.
+    if (grayRatio >= 0.985 && colorfulRatio <= 0.004 && luminanceDeviation <= 22 && meanLuminance >= 205) return false;
+
+    return true;
   } finally {
     URL.revokeObjectURL(objectUrl);
   }

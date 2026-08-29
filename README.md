@@ -2,7 +2,7 @@
 
 BookStats is a local-first personal library manager and reading-statistics application built primarily for the web, with optional Windows and macOS desktop packaging through Tauri. It is a ground-up TypeScript/React rewrite of the earlier Python BookStats prototype.
 
-**Current version:** `1.1.0` — incremental cloud synchronization, safer retry batching, and cleaner catalog cover selection
+**Current version:** `1.1.1` — incremental cloud synchronization, safer retry batching, and cleaner catalog cover selection
 
 ## Mobile Home Screen app
 
@@ -363,7 +363,7 @@ Configure at least:
 BOOKSTATS_HOST=127.0.0.1
 BOOKSTATS_PORT=8787
 DATABASE_URL=postgresql://bookstats:YOUR_PASSWORD@127.0.0.1:5432/bookstats
-BOOKSTATS_METADATA_USER_AGENT=BookStats/1.1.0 (your-real-contact@example.com)
+BOOKSTATS_METADATA_USER_AGENT=BookStats/1.1.1 (your-real-contact@example.com)
 # Optional but recommended for the full v0.9 metadata stack:
 BOOKSTATS_GOOGLE_BOOKS_API_KEY=your_google_books_api_key
 BOOKSTATS_HARDCOVER_API_TOKEN=your_hardcover_api_token

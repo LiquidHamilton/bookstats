@@ -1,4 +1,4 @@
-const CACHE_NAME = "bookstats-shell-v1.1.0";
+const CACHE_NAME = "bookstats-shell-v1.1.1";
 const APP_ROOT = new URL("./", self.location.href).pathname;
 const APP_INDEX = APP_ROOT;
 const API_PREFIX = `${APP_ROOT}api/`;

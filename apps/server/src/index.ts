@@ -7,9 +7,9 @@ import type { Book, MetadataCandidate, ReadingGoal, Shelf, SyncAcknowledgement, 
 import { getMetadataDetails, metadataProviderStatuses, searchAllMetadata } from "./metadata.js";
 import { emailConfigured, emailProvider, feedbackConfigured, sendFeedbackEmail, sendPasswordChangedEmail, sendPasswordResetEmail, sendVerificationEmail } from "./email.js";
 import { registerAdminRoutes } from "./admin.js";
-import { archiveCoverForUser, getCoverAssetByToken, listCoverAssetPathsForUser, readStoredCover, removeStoredCoverFiles } from "./covers.js";
+import { archiveCoverForUser, fetchRemoteCoverForInspection, getCoverAssetByToken, listCoverAssetPathsForUser, readStoredCover, removeStoredCoverFiles } from "./covers.js";
 
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.1.1";
 const MIN_CLIENT_VERSION = "1.0.1";
 const SESSION_DAYS = 30;
 const MIN_PASSWORD_LENGTH = 10;
@@ -90,6 +90,22 @@ app.get("/health", async () => ({
 }));
 
 app.get("/api/v1", async () => ({ name: "BookStats API", version: 1, appVersion: APP_VERSION, minimumClientVersion: MIN_CLIENT_VERSION, status: "accounts-sync-metadata-email-feedback-cover-assets" }));
+
+
+app.get<{ Querystring: { url?: string } }>("/api/v1/covers/inspect", async (request, reply) => {
+  const coverUrl = request.query.url?.trim();
+  if (!coverUrl) return reply.code(400).send({ error: "A cover URL is required." });
+  try {
+    const image = await fetchRemoteCoverForInspection(coverUrl);
+    reply.header("Cache-Control", "private, max-age=86400");
+    reply.header("Content-Length", String(image.bytes.length));
+    reply.type(image.mimeType);
+    return reply.send(image.bytes);
+  } catch (error) {
+    request.log.debug({ error, coverUrl }, "Could not inspect catalog cover");
+    return reply.code(422).send({ error: "Catalog cover could not be inspected." });
+  }
+});
 
 app.get<{ Params: { assetId: string; accessToken: string } }>("/api/v1/covers/:assetId/:accessToken", async (request, reply) => {
   const db = requireDb(reply); if (!db) return;

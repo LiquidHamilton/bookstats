@@ -150,6 +150,22 @@ export async function resetPassword(token: string, password: string, confirmPass
 export async function syncAccountLibrary(cursor: string | undefined, changes: SyncMutation[]): Promise<SyncResponse> {
   return apiFetch<SyncResponse>("/sync", { method: "POST", body: JSON.stringify({ cursor, changes }) }, true);
 }
+
+export async function fetchCatalogCoverForInspection(coverUrl: string): Promise<Blob | undefined> {
+  const params = new URLSearchParams({ url: coverUrl });
+  try {
+    const response = await fetch(`${apiBaseUrl()}/covers/inspect?${params.toString()}`, {
+      cache: "force-cache",
+      headers: { "x-bookstats-client-version": __BOOKSTATS_VERSION__ }
+    });
+    if (!response.ok) return undefined;
+    const blob = await response.blob();
+    return blob.type.startsWith("image/") ? blob : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function archiveSelectedCover(coverUrl: string): Promise<{ assetId: string; assetToken: string; sourceUrl?: string }> {
   return apiFetch<{ assetId: string; assetToken: string; sourceUrl?: string }>("/covers/archive", { method: "POST", body: JSON.stringify({ coverUrl }) }, true);
 }

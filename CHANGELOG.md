@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1
+
+- Fixed catalog-cover validation for providers that block browser-side image fetches with CORS. BookStats now asks its own API to safely retrieve candidate cover images for inspection, so the picker can actually examine the pixels instead of silently accepting uninspectable artwork.
+- Strengthened cover-quality filtering to reject tiny/tracking images, implausible cover aspect ratios, nearly blank white tiles, and bright grayscale “Image Not Available” style placeholders while retaining normal light-colored cover art.
+- If a catalog image cannot be validated at all, it is now omitted from the optional cover chooser instead of being displayed as questionable artwork.
+- Bumped the PWA shell cache generation so installed web apps receive the corrected cover-picker code immediately.
+- No database migration is required.
+
 ## 1.1.0
 
 - Reworked cloud synchronization around a persistent per-record outbox. BookStats now uploads only books, shelves and reading goals that changed locally, plus deletion tombstones, instead of sending the complete live library after every edit.

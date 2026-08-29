@@ -39,6 +39,11 @@ interface PreparedImage {
   sourceUrl?: string;
 }
 
+export interface RemoteCoverImage {
+  bytes: Buffer;
+  mimeType: string;
+}
+
 export function coverStorageRoot(): string {
   return resolve(process.env.BOOKSTATS_COVER_DIR?.trim() || resolve(PROJECT_ROOT, "data", "covers"));
 }
@@ -48,6 +53,15 @@ export function absoluteCoverAssetPath(storagePath: string): string {
   const candidate = resolve(root, storagePath);
   if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) throw new Error("Invalid cover asset path.");
   return candidate;
+}
+
+export async function fetchRemoteCoverForInspection(coverUrl: string): Promise<RemoteCoverImage> {
+  const parsed = new URL(coverUrl);
+  const hostname = parsed.hostname.toLowerCase();
+  const catalogHost = hostname === "covers.openlibrary.org" || hostname === "books.google.com" || hostname === "assets.hardcover.app";
+  if (!catalogHost) throw new Error("Cover inspection is limited to BookStats catalog providers.");
+  const prepared = await fetchRemoteCover(coverUrl);
+  return { bytes: prepared.bytes, mimeType: prepared.mimeType };
 }
 
 export async function archiveCoverForUser(db: Queryable, userId: string, coverValue: string): Promise<CoverAssetRecord> {
@@ -162,7 +176,7 @@ async function fetchRemoteCover(value: string): Promise<PreparedImage> {
     const response = await fetch(current, {
       redirect: "manual",
       signal: AbortSignal.timeout(REMOTE_TIMEOUT_MS),
-      headers: { "user-agent": process.env.BOOKSTATS_METADATA_USER_AGENT ?? "BookStats cover archiver" }
+      headers: remoteCoverHeaders(current)
     });
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
@@ -192,6 +206,20 @@ async function fetchRemoteCover(value: string): Promise<PreparedImage> {
     return { ...identified, sourceUrl: value };
   }
   throw new Error("Could not download cover image.");
+}
+
+function remoteCoverHeaders(url: URL): Record<string, string> {
+  if (url.hostname.toLowerCase() === "books.google.com") {
+    // Google Books occasionally serves its generic "Image Not Available" bitmap to
+    // non-browser downloaders even when the public cover URL is valid. Use ordinary browser
+    // image-request headers for both inspection and durable cover archiving.
+    return {
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
+      accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      referer: "https://books.google.com/"
+    };
+  }
+  return { "user-agent": process.env.BOOKSTATS_METADATA_USER_AGENT ?? "BookStats cover archiver" };
 }
 
 async function assertSafeRemoteUrl(url: URL): Promise<void> {
