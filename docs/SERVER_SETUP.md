@@ -20,7 +20,7 @@ The production `/opt/bookstats/.env` should contain at least:
 BOOKSTATS_HOST=127.0.0.1
 BOOKSTATS_PORT=8790
 DATABASE_URL=postgresql://bookstats:CHANGE_ME@127.0.0.1:5432/bookstats
-BOOKSTATS_METADATA_USER_AGENT=BookStats/1.0.4 (your-real-contact@example.com)
+BOOKSTATS_METADATA_USER_AGENT=BookStats/1.1.0 (your-real-contact@example.com)
 BOOKSTATS_CORS_ORIGIN=https://kylecarroll.com,tauri://localhost,http://tauri.localhost
 # HTTP(S) origins automatically allow their matching www/non-www counterpart.
 BOOKSTATS_PUBLIC_URL=https://kylecarroll.com/bookstats/
@@ -191,6 +191,8 @@ location ^~ /bookstats/ {
 
 Adjust `8790` if `BOOKSTATS_PORT` uses another local port.
 
+The `25m` request limit is an emergency ceiling, not the expected sync size. BookStats v1.1 keeps a persistent local outbox and normally sends only changed records in batches capped at roughly 900 KiB and 100 records. Retaining a larger reverse-proxy ceiling protects unusual single records and upgrade/recovery cases without making normal edits large transfers.
+
 ## systemd
 
 Example `/etc/systemd/system/bookstats.service`:
@@ -229,8 +231,8 @@ sudo systemctl enable --now bookstats
 Local `export.sh` produces matching server/web ZIPs:
 
 ```text
-BookStats-Web-v1.0.4.zip
-BookStats-Server-v1.0.4.zip
+BookStats-Web-v1.1.0.zip
+BookStats-Server-v1.1.0.zip
 ```
 
 A signed desktop build also produces a deployment wrapper such as:

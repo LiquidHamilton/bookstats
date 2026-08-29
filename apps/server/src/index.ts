@@ -3,13 +3,13 @@ import cors from "@fastify/cors";
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import { Pool, type PoolClient } from "pg";
-import type { Book, MetadataCandidate, ReadingGoal, Shelf, SyncMutation, SyncRecord, UserAccount } from "@bookstats/domain";
+import type { Book, MetadataCandidate, ReadingGoal, Shelf, SyncAcknowledgement, SyncMutation, SyncRecord, UserAccount } from "@bookstats/domain";
 import { getMetadataDetails, metadataProviderStatuses, searchAllMetadata } from "./metadata.js";
 import { emailConfigured, emailProvider, feedbackConfigured, sendFeedbackEmail, sendPasswordChangedEmail, sendPasswordResetEmail, sendVerificationEmail } from "./email.js";
 import { registerAdminRoutes } from "./admin.js";
 import { archiveCoverForUser, getCoverAssetByToken, listCoverAssetPathsForUser, readStoredCover, removeStoredCoverFiles } from "./covers.js";
 
-const APP_VERSION = "1.0.4";
+const APP_VERSION = "1.1.0";
 const MIN_CLIENT_VERSION = "1.0.1";
 const SESSION_DAYS = 30;
 const MIN_PASSWORD_LENGTH = 10;
@@ -390,6 +390,7 @@ app.post<{ Body: { cursor?: string; changes?: SyncMutation[] } }>("/api/v1/sync"
   const cursor = parseCursor(request.body?.cursor);
   const client = await db.connect();
   let accepted = 0;
+  const acknowledged: SyncAcknowledgement[] = [];
   try {
     await client.query("BEGIN");
     for (const change of changes) {
@@ -402,7 +403,14 @@ app.post<{ Body: { cursor?: string; changes?: SyncMutation[] } }>("/api/v1/sync"
       const existing = await client.query<{ client_updated_at: Date }>(
         "SELECT client_updated_at FROM library_records WHERE user_id = $1 AND id = $2 FOR UPDATE", [request.bookstatsUser.id, change.id]
       );
-      if (existing.rows[0] && existing.rows[0].client_updated_at.getTime() > incomingTime.getTime()) continue;
+      const acknowledgement: SyncAcknowledgement = { id: change.id, entityType, deleted: Boolean(change.deleted), clientUpdatedAt: incomingTime.toISOString() };
+      // Incremental retries are idempotent. If the server already has the same or a
+      // newer client timestamp, this mutation no longer needs to remain in the device
+      // outbox even though it should not create another server revision.
+      if (existing.rows[0] && existing.rows[0].client_updated_at.getTime() >= incomingTime.getTime()) {
+        acknowledged.push(acknowledgement);
+        continue;
+      }
       await client.query(
         `INSERT INTO library_records (id, user_id, record_type, book_data, client_updated_at, deleted_at)
          VALUES ($1, $2, $3, $4::jsonb, $5, $6)
@@ -416,6 +424,7 @@ app.post<{ Body: { cursor?: string; changes?: SyncMutation[] } }>("/api/v1/sync"
         [change.id, request.bookstatsUser.id, entityType, change.deleted ? null : JSON.stringify(payload ?? null), incomingTime.toISOString(), change.deleted ? incomingTime.toISOString() : null]
       );
       accepted += 1;
+      acknowledged.push(acknowledgement);
     }
     const serverCursorResult = await client.query<{ cursor: Date }>("SELECT now() AS cursor");
     const serverCursor = serverCursorResult.rows[0].cursor.toISOString();
@@ -441,7 +450,7 @@ app.post<{ Body: { cursor?: string; changes?: SyncMutation[] } }>("/api/v1/sync"
         revision: Number(row.revision)
       };
     });
-    return { cursor: serverCursor, changes: records, accepted };
+    return { cursor: serverCursor, changes: records, accepted, acknowledged };
   } catch (error) {
     await client.query("ROLLBACK");
     request.log.error(error);

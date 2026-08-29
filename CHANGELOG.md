@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.0
+
+- Reworked cloud synchronization around a persistent per-record outbox. BookStats now uploads only books, shelves and reading goals that changed locally, plus deletion tombstones, instead of sending the complete live library after every edit.
+- Repeated edits to the same record coalesce automatically to its latest local state. A one-book metadata edit now produces a one-book sync payload.
+- Added bounded sync batching: large backlogs are split into requests of at most 100 records and approximately 900 KiB each, while a device with no local edits performs a pull-only sync.
+- Added explicit server acknowledgements so successful mutations, idempotent retries and safely superseded changes can be removed from the local outbox without guessing. Acknowledgement cleanup is timestamp-conditional so edits made while a request is in flight remain queued.
+- Preserved the server cursor after each successful batch. If a later batch fails, previously applied cloud changes are not repeatedly downloaded and all unacknowledged local work remains saved for retry.
+- Added a one-time v1.0.x upgrade bootstrap that seeds the new outbox only from records newer than the device's last successful sync, preserving offline edits without re-uploading an already-synchronized library.
+- Hardened sync conflict handling for books, shelves, goals and deletions so newer local work is not overwritten by an older server response arriving while a save is in flight.
+- Improved oversized-sync errors: HTTP 413 now explains that the user's changes are still saved locally and remain queued instead of being reported as a generic connectivity failure.
+- Prevented cloud-originated shelf deletion cleanup from restamping every affected book as a new local edit.
+- Cleaned up the catalog cover picker so obvious placeholder URLs, failed/non-image responses, nearly blank white artwork and common “Image Not Available” cards are omitted when they can be safely inspected. Validation is concurrency-limited to avoid a burst of image downloads.
+- Kept synchronization bookkeeping internal. The normal Account UI remains intentionally simple and does not expose pending-record counts or batch diagnostics.
+- Bumped the PWA shell cache generation for v1.1.0 so installed web apps retire stale static assets cleanly after the update.
+- No PostgreSQL schema migration is required for v1.1.0; the only new local storage is the device-side sync outbox.
+
 ## 1.0.4
 
 - Added a small Library Health easter egg for a perfectly clean catalog: when every applicable metadata check passes, BookStats now displays **The Librarian Approves.** and a brief completion message.

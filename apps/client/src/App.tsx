@@ -205,11 +205,13 @@ export default function App() {
     try {
       do {
         syncQueued.current = false;
-        const [currentBooks, currentShelves, currentGoals] = await Promise.all([repository.listBooks(), repository.listShelves(), repository.listGoals()]);
-        await synchronizeLibrary(repository, currentBooks, currentShelves, currentGoals, account.id);
-        const completedAt = new Date().toISOString(); await repository.setMeta(`lastSuccessfulSync:${account.id}`, completedAt);
+        const result = await synchronizeLibrary(repository, account.id);
+        const completedAt = new Date().toISOString();
+        await repository.setMeta(`lastSuccessfulSync:${account.id}`, completedAt);
         setLastSync(completedAt);
-        await refresh(repository);
+        // Local saves already updated React state. Re-read storage only when cloud
+        // records were reconciled, keeping the common one-book edit path lightweight.
+        if (result.pulled > 0) await refresh(repository);
       } while (syncQueued.current);
     } catch (error) { setSyncError(error instanceof Error ? error.message : "Synchronization failed."); throw error; }
     finally { syncInFlight.current = false; setSyncing(false); }

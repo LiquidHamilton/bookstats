@@ -346,10 +346,19 @@ export interface SyncRecord {
   revision: number;
 }
 
+export interface SyncAcknowledgement {
+  id: string;
+  entityType?: SyncEntityType;
+  deleted: boolean;
+  clientUpdatedAt: string;
+}
+
 export interface SyncResponse {
   cursor: string;
   changes: SyncRecord[];
   accepted: number;
+  /** Mutations the server has durably accepted or already superseded. */
+  acknowledged?: SyncAcknowledgement[];
 }
 
 export const READING_STATUS_LABELS: Record<ReadingStatus, string> = {

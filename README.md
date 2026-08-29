@@ -2,7 +2,7 @@
 
 BookStats is a local-first personal library manager and reading-statistics application built primarily for the web, with optional Windows and macOS desktop packaging through Tauri. It is a ground-up TypeScript/React rewrite of the earlier Python BookStats prototype.
 
-**Current version:** `1.0.4` — installable mobile web-app polish, unified BookStats iconography, and signed desktop auto-updates
+**Current version:** `1.1.0` — incremental cloud synchronization, safer retry batching, and cleaner catalog cover selection
 
 ## Mobile Home Screen app
 
@@ -181,6 +181,7 @@ When PostgreSQL is configured, the **Account** section supports:
 - per-device sync cursors
 - manual synchronization plus visible last-successful-sync and error state
 - automatic sync after local edits while signed in
+- incremental per-record uploads with a persistent local outbox and bounded retry batches
 - change password from a dedicated security dialog
 - delete the cloud library while keeping desktop-local data, or permanently delete the account
 - synchronized reading goals alongside books and shelves
@@ -362,7 +363,7 @@ Configure at least:
 BOOKSTATS_HOST=127.0.0.1
 BOOKSTATS_PORT=8787
 DATABASE_URL=postgresql://bookstats:YOUR_PASSWORD@127.0.0.1:5432/bookstats
-BOOKSTATS_METADATA_USER_AGENT=BookStats/1.0.4 (your-real-contact@example.com)
+BOOKSTATS_METADATA_USER_AGENT=BookStats/1.1.0 (your-real-contact@example.com)
 # Optional but recommended for the full v0.9 metadata stack:
 BOOKSTATS_GOOGLE_BOOKS_API_KEY=your_google_books_api_key
 BOOKSTATS_HARDCOVER_API_TOKEN=your_hardcover_api_token
@@ -490,11 +491,13 @@ npx tauri icon public/bookstats-icon.png
 
 ## Current sync design
 
-v0.3 deliberately synchronizes the complete BookStats `Book` record as JSONB in `library_records`. The normalized `works`, `editions`, and `reading_sessions` catalog schema remains in place for the longer-term model, but sync does not depend on that normalization yet.
+BookStats v1.1 uses an incremental per-record outbox on each device. Saving a book, shelf, or reading goal updates one compact local outbox entry; repeated edits to the same record replace that entry with its latest timestamp instead of adding duplicate work. Deletions continue to use durable tombstones. A normal one-book edit therefore uploads that book record rather than rebuilding an upload from the complete library.
 
-This keeps the first cloud implementation understandable and allows the browser and desktop clients to synchronize all current fields immediately.
+Large backlogs are split into bounded requests of at most 100 records and approximately 900 KiB. The server returns explicit acknowledgements for newly accepted mutations as well as safe retries that it has already applied or superseded, so the client can clear only the exact outbox/tombstone entries that are durably accounted for. The server cursor is saved after every successful batch; any later failed batch simply remains queued locally. Pull-only sync requests still run when the device has no local edits so changes made on other devices arrive normally.
 
-Conflict policy in this iteration is intentionally conservative: the server accepts the newest client `updatedAt` for a record and returns newer server state to the client. Notes/review field-level conflict UI remains a later hardening task.
+The v1.1 upgrade seeds the outbox once from records newer than the device's last successful v1.0.x sync timestamp. That preserves unsynced offline edits without forcing an already-synchronized multi-thousand-book library through the network again. Sync implementation details remain internal; the Account UI intentionally stays simple.
+
+Each synchronized item is still stored as a complete BookStats record in PostgreSQL JSONB. Synchronization is incremental at the record level rather than field-diff level: editing one book sends one book, not one field and not the whole library. Newer local saves/deletes are protected from older in-flight server responses. Notes/review field-level conflict UI remains a later hardening task.
 
 ## Security note
 

@@ -3,7 +3,7 @@ import type { Book, BookCondition, BookFormat, MetadataCandidate, MetadataField,
 import { BOOK_CONDITIONS, isSmartShelf, normalizedReadingSessions, READING_STATUS_LABELS } from "@bookstats/domain";
 import { CalendarPlus, ImagePlus, LoaderCircle, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { MetadataLookup } from "./MetadataLookup";
-import { cacheRemoteCover, prepareUploadedCover } from "../data/covers";
+import { cacheRemoteCover, filterUsableCoverUrls, prepareUploadedCover } from "../data/covers";
 import { CoverImage } from "./CoverImage";
 import { archiveSelectedCover, getAuthToken, metadataDetails, searchMetadata } from "../data/api";
 
@@ -242,17 +242,23 @@ export function BookForm({ book, initialIsbn, autoLookupIsbn = false, shelves, o
     apply("language", language, candidate.language, (value) => setLanguage(String(value)));
     apply("format", format, candidate.format, (value) => setFormat(value as BookFormat));
     apply("description", description, candidate.description, (value) => setDescription(String(value)));
-    if (!hasMetadataValue(coverAssetId || coverUrl || coverSourceUrl || cachedCoverDataUrl) && candidate.coverUrl) {
-      selectCover(candidate.coverUrl, false);
-      applied.add("coverUrl");
-    }
+    const hasCurrentCover = hasMetadataValue(coverAssetId || coverUrl || coverSourceUrl || cachedCoverDataUrl);
     if (!genre.trim() && candidate.subjects.length) {
       setGenre(candidate.subjects[0]);
       applied.add("genre");
     }
 
     const coverChoices = [...new Set([...(candidate.coverUrls ?? []), ...(candidate.coverUrl ? [candidate.coverUrl] : [])])];
-    if (coverChoices.length) setCoverOptions(coverChoices);
+    if (coverChoices.length) {
+      void filterUsableCoverUrls(coverChoices).then((usable) => {
+        setCoverOptions(usable);
+        if (!hasCurrentCover && usable[0]) {
+          selectCover(usable[0], false);
+          const provider = candidate.fieldSources?.coverUrl;
+          if (provider) setMetadataSources((current) => ({ ...current, coverUrl: provider }));
+        }
+      });
+    }
     setMetadataSources((current) => {
       const next = { ...current };
       for (const field of applied) {
@@ -305,7 +311,8 @@ export function BookForm({ book, initialIsbn, autoLookupIsbn = false, shelves, o
   async function coverUrlsFromCandidates(candidates: MetadataCandidate[], detailCount: number): Promise<string[]> {
     const detailResults = await Promise.allSettled(candidates.slice(0, detailCount).map((candidate) => metadataDetails(candidate)));
     const detailed = detailResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-    return [...new Set([...candidates, ...detailed].flatMap((candidate) => [...(candidate.coverUrls ?? []), ...(candidate.coverUrl ? [candidate.coverUrl] : [])]).filter(Boolean))];
+    const urls = [...new Set([...candidates, ...detailed].flatMap((candidate) => [...(candidate.coverUrls ?? []), ...(candidate.coverUrl ? [candidate.coverUrl] : [])]).filter(Boolean))];
+    return filterUsableCoverUrls(urls);
   }
 
   async function loadCatalogCovers() {
@@ -578,7 +585,7 @@ export function BookForm({ book, initialIsbn, autoLookupIsbn = false, shelves, o
             <label className="wide">Genre<input value={genre} onChange={(e) => { setGenre(e.target.value); clearMetadataSource("genre"); }} placeholder="Science Fiction" /></label>
             <label className="wide">Tags<input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="signed, first edition, comfort read" /><small>Separate tags with commas. Shelves are managed separately below.</small></label>
             {(coverUrl || coverAssetId || cachedCoverDataUrl || coverSourceUrl) && <div className="wide selected-cover-preview"><CoverImage book={coverPreviewRecord} alt="Selected book cover" /><div><strong>Selected cover</strong><span>{coverAssetId ? "Stored in your BookStats cover archive and cached locally when available." : coverUrl.startsWith("data:") ? "Custom image stored locally; it will be archived when cloud sync is available." : cachedCoverDataUrl ? "Catalog cover cached locally; BookStats will archive the selected image when signed in." : "Catalog/URL cover."}</span></div></div>}
-            {coverOptions.length > 0 && <div className="wide alternate-cover-picker"><div className="alternate-cover-heading"><strong>Catalog covers</strong><span>Choose the edition artwork you want BookStats to display.</span></div><div className="alternate-cover-grid">{coverOptions.map((url) => <button type="button" key={url} className={coverUrl === url ? "selected" : ""} onClick={() => selectCover(url, true)}><img src={url} alt="Alternate cover option" loading="lazy" /></button>)}</div></div>}
+            {coverOptions.length > 0 && <div className="wide alternate-cover-picker"><div className="alternate-cover-heading"><strong>Catalog covers</strong><span>Choose the edition artwork you want BookStats to display.</span></div><div className="alternate-cover-grid">{coverOptions.map((url) => <button type="button" key={url} className={coverUrl === url ? "selected" : ""} onClick={() => selectCover(url, true)}><img src={url} alt="Alternate cover option" loading="lazy" onError={() => setCoverOptions((current) => current.filter((item) => item !== url))} /></button>)}</div></div>}
             <label className="wide">Cover URL<input value={coverUrl.startsWith("data:") ? "" : coverUrl} onChange={(e) => selectCover(e.target.value, true)} placeholder={coverUrl.startsWith("data:") ? "Custom cover selected" : "https://…"} /></label>
             <div className="wide cover-actions">
               <button className="button secondary" type="button" disabled={Boolean(catalogAction) || !title.trim() || !author.trim()} onClick={() => void loadCatalogCovers()}>{catalogAction === "covers" ? <LoaderCircle className="spin" size={16} /> : <ImagePlus size={16} />}Load catalog covers</button>

@@ -90,6 +90,12 @@ async function apiFetch<T>(path: string, init: RequestInit = {}, authenticated =
   }
   const payload = await response.json().catch(() => ({})) as { error?: string; serverVersion?: string } & T;
   if (response.status === 426) notifyUpdateRequired(payload.serverVersion);
+  if (response.status === 413 && path === "/sync") {
+    throw new ApiError(
+      "Synchronization data was too large for the server. Your changes are still saved locally and will remain queued for the next sync.",
+      413
+    );
+  }
   if (!response.ok) throw new ApiError(payload.error || `BookStats server returned ${response.status}.`, response.status);
   return payload;
 }

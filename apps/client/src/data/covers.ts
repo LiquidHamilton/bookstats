@@ -61,6 +61,89 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
+const PLACEHOLDER_URL_PATTERN = /(?:image[-_ ]?not[-_ ]?available|no[-_ ]?(?:image|cover)|missing[-_ ]?(?:image|cover)|default[-_ ]?(?:image|cover)|placeholder|cover[-_ ]?coming[-_ ]?soon)/i;
+const COVER_VALIDATION_CONCURRENCY = 4;
+
+/**
+ * Remove catalog results that are clearly placeholders or effectively blank images.
+ * Validation is deliberately conservative: if a third-party host blocks browser CORS,
+ * BookStats keeps the URL unless its name itself identifies it as a placeholder.
+ */
+export async function filterUsableCoverUrls(values: string[]): Promise<string[]> {
+  const urls = [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+  if (!urls.length) return [];
+  const results = new Array<boolean>(urls.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < urls.length) {
+      const index = nextIndex++;
+      results[index] = await coverUrlLooksUsable(urls[index]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(COVER_VALIDATION_CONCURRENCY, urls.length) }, () => worker()));
+  return urls.filter((_url, index) => results[index]);
+}
+
+async function coverUrlLooksUsable(url: string): Promise<boolean> {
+  if (PLACEHOLDER_URL_PATTERN.test(safeDecodedUrl(url))) return false;
+  if (!/^https?:\/\//i.test(url)) return true;
+  try {
+    const response = await fetch(url, { cache: "force-cache" });
+    if (!response.ok) return false;
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/")) return false;
+    return imageBlobLooksUsable(blob);
+  } catch {
+    // Some cover hosts allow <img> display while blocking fetch() with CORS. Do not
+    // discard a potentially valid cover solely because it cannot be inspected.
+    return true;
+  }
+}
+
+function safeDecodedUrl(url: string): string {
+  try { return decodeURIComponent(url); } catch { return url; }
+}
+
+async function imageBlobLooksUsable(blob: Blob): Promise<boolean> {
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const image = await loadImage(objectUrl);
+    if (image.naturalWidth < 2 || image.naturalHeight < 2) return false;
+
+    const width = 32;
+    const height = 48;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return true;
+    context.drawImage(image, 0, 0, width, height);
+    const pixels = context.getImageData(0, 0, width, height).data;
+    let nearWhite = 0;
+    let nonWhite = 0;
+    let dark = 0;
+    const total = width * height;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const red = pixels[index];
+      const green = pixels[index + 1];
+      const blue = pixels[index + 2];
+      if (red >= 242 && green >= 242 && blue >= 242) nearWhite += 1;
+      else nonWhite += 1;
+      if (red <= 205 && green <= 205 && blue <= 205) dark += 1;
+    }
+    const whiteRatio = nearWhite / total;
+    const nonWhiteRatio = nonWhite / total;
+    const darkRatio = dark / total;
+    // Blank files are almost entirely white. Common “Image Not Available” cards are
+    // similarly white with only a small amount of dark text/icon artwork.
+    return !(whiteRatio >= 0.93 && nonWhiteRatio <= 0.07 && darkRatio <= 0.05);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 /**
  * Return cover sources in display priority order. A selected cover is user data, so the UI
  * should gracefully fall through to the original source if a local cache or archived copy

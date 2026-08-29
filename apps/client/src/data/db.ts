@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from "dexie";
-import type { Book, ReadingGoal, Shelf } from "@bookstats/domain";
+import type { Book, ReadingGoal, Shelf, SyncEntityType } from "@bookstats/domain";
 
 export interface Tombstone {
   id: string;
@@ -11,6 +11,13 @@ export interface LocalMeta {
   value: string;
 }
 
+export interface SyncOutboxEntry {
+  key: string;
+  entityType: SyncEntityType;
+  id: string;
+  clientUpdatedAt: string;
+}
+
 export const db = new Dexie("bookstats") as Dexie & {
   books: EntityTable<Book, "id">;
   shelves: EntityTable<Shelf, "id">;
@@ -18,6 +25,7 @@ export const db = new Dexie("bookstats") as Dexie & {
   tombstones: EntityTable<Tombstone, "id">;
   shelfTombstones: EntityTable<Tombstone, "id">;
   goalTombstones: EntityTable<Tombstone, "id">;
+  syncOutbox: EntityTable<SyncOutboxEntry, "key">;
   meta: EntityTable<LocalMeta, "key">;
 };
 
@@ -65,5 +73,19 @@ db.version(5).stores({
   tombstones: "id, deletedAt",
   shelfTombstones: "id, deletedAt",
   goalTombstones: "id, deletedAt",
+  meta: "key"
+});
+
+// v1.1 adds a persistent per-record sync outbox. Local writes update one compact
+// outbox entry, so repeated edits coalesce and a normal sync no longer has to scan
+// or upload the complete library.
+db.version(6).stores({
+  books: "id, title, author, series, status, owned, rating, dateAdded, updatedAt, *tags, *readDates, *shelfIds",
+  shelves: "id, &name, updatedAt",
+  goals: "id, metric, startDate, endDate, updatedAt",
+  tombstones: "id, deletedAt",
+  shelfTombstones: "id, deletedAt",
+  goalTombstones: "id, deletedAt",
+  syncOutbox: "key, entityType, id, clientUpdatedAt",
   meta: "key"
 });
