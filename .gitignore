@@ -1,3 +1,42 @@
-.DS_Store
-/apps/client/src-tauri/target/
+# dependencies
+node_modules/
 
+# builds
+dist/
+target/
+apps/client/src-tauri/target/
+coverage/
+*.tsbuildinfo
+
+# build/cache tooling
+.vite/
+.vitest/
+.cache/
+
+# release/package artifacts
+*.dmg
+*.msi
+*.msix
+*.app/
+*.dSYM/
+
+# environment
+.env
+.env.*
+!.env.example
+
+# local databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# logs
+*.log
+npm-debug.log*

@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="BookStats">
-  <rect width="1024" height="1024" rx="230" fill="#d8b66b"/>
-  <g fill="none" stroke="#20241f" stroke-width="66" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M512 337v430"/>
-    <path d="M176 696V277c0-24 19-43 43-43h176c65 0 117 52 117 117 0-65 52-117 117-117h176c24 0 43 19 43 43v419c0 24-19 43-43 43H629c-65 0-117 52-117 117 0-65-52-117-117-117H219c-24 0-43-19-43-43z"/>
-  </g>
-</svg>
