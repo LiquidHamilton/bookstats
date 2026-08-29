@@ -1,0 +1,15 @@
+#Bookstats Workflow
+
+unzip -o ~/Downloads/BookStats_v1.0.4_patch.zip -d .
+
+npm install
+npm run typecheck
+npm test
+npm run build
+
+./export.sh all
+./upload_bookstats_releases.sh
+
+#On the server
+
+unpack_bookstats
