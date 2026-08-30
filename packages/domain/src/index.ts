@@ -118,6 +118,8 @@ export interface LoanRecord {
 }
 
 export interface SeriesCompletionOverride {
+  /** Hide this series from collection-completion tracking without changing book metadata. */
+  ignoredFromTracking?: boolean;
   /** Optional manual expected size for the mainline series. */
   expectedCount?: number;
   /** Catalog rows explicitly excluded from completion calculations. */
@@ -178,6 +180,8 @@ export interface Book {
   metadataSourceRefs?: MetadataSourceRef[];
   /** Provider provenance for catalog-managed fields. */
   metadataSources?: Partial<Record<MetadataField, MetadataProvider>>;
+  /** Internal 0-100 confidence assigned to catalog-managed fields. Not shown in the normal UI. */
+  metadataConfidence?: Partial<Record<MetadataField, number>>;
   /** @deprecated Legacy pre-v1.0.2 field. Retained only so older exports remain readable; current metadata lookup ignores it. */
   metadataManualFields?: MetadataField[];
   /** Known series catalog information from a provider such as Hardcover or Google Books. */
@@ -188,6 +192,8 @@ export interface Book {
   loans?: LoanRecord[];
   /** Record IDs that the user explicitly confirmed are separate editions/copies, not duplicates. */
   duplicateIgnoreIds?: string[];
+  /** Library Health findings the user explicitly confirmed are intentional/not applicable for this record. */
+  healthExceptions?: string[];
   /** Stable IDs from imported services, used to make repeated imports idempotent. */
   sourceIds?: Record<string, string>;
   dateAdded: string;
@@ -241,6 +247,13 @@ export interface MetadataSourceRef {
   editionId?: string;
   exactIsbn?: string;
   sourceUrl?: string;
+}
+
+export interface MetadataCoverCandidate {
+  url: string;
+  provider: MetadataProvider;
+  confidence: number;
+  exactEdition?: boolean;
 }
 
 export interface SeriesCatalogBook {
@@ -303,9 +316,13 @@ export interface MetadataCandidate {
   coverUrl?: string;
   /** Alternate cover choices aggregated across metadata providers. */
   coverUrls?: string[];
+  /** Per-cover provenance retained even when client-side quality ranking changes display order. */
+  coverCandidates?: MetadataCoverCandidate[];
   sourceUrl?: string;
   /** Provider selected for each normalized field after merge. */
   fieldSources?: Partial<Record<MetadataField, MetadataProvider>>;
+  /** Internal 0-100 confidence for each normalized field after provider merge. */
+  fieldConfidence?: Partial<Record<MetadataField, number>>;
 }
 
 export interface UserAccount {

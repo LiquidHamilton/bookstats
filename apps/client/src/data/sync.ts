@@ -1,5 +1,5 @@
 import type { Book, ReadingGoal, Shelf, SyncAcknowledgement, SyncMutation, SyncRecord, SyncResponse } from "@bookstats/domain";
-import { syncAccountLibrary } from "./api";
+import { ApiError, syncAccountLibrary } from "./api";
 import { syncOutboxEntry, type LibraryRepository } from "./libraryRepository";
 
 const EPOCH = "1970-01-01T00:00:00.000Z";
@@ -7,6 +7,8 @@ const MAX_BATCH_RECORDS = 100;
 // Normal sync traffic should stay comfortably below both Fastify's and NGINX's
 // emergency body limits. A single unusually large record is still sent alone.
 const MAX_BATCH_BYTES = 900 * 1024;
+const MAX_SYNC_ATTEMPTS = 4;
+const RETRY_BASE_MS = 350;
 
 export interface SyncResult {
   pushed: number;
@@ -43,11 +45,13 @@ export async function synchronizeLibrary(repository: LibraryRepository, accountI
   let activeCursor = cursor;
   let pushed = 0;
   let pulled = 0;
+  const startedAt = performance.now();
 
   for (let index = 0; index < batches.length; index += 1) {
     const batch = batches[index];
-    console.debug(`[BookStats sync] batch ${index + 1}/${batches.length}: ${batch.length} local changes, ${requestBytes(activeCursor, batch)} bytes`);
-    const response = await syncAccountLibrary(activeCursor, batch);
+    const bytes = requestBytes(activeCursor, batch);
+    console.debug(`[BookStats sync] batch ${index + 1}/${batches.length}: ${batch.length} local changes, ${bytes} bytes`);
+    const response = await syncBatchWithRetry(activeCursor, batch, index + 1, batches.length);
     pushed += response.accepted;
     pulled += response.changes.length;
 
@@ -64,8 +68,37 @@ export async function synchronizeLibrary(repository: LibraryRepository, accountI
     await repository.setMeta(cursorKey, activeCursor);
   }
 
+  console.debug(`[BookStats sync] complete: ${pushed} accepted, ${pulled} pulled, ${batches.length} batches, ${Math.round(performance.now() - startedAt)} ms`);
   return { pushed, pulled, cursor: activeCursor ?? EPOCH, batches: batches.length };
 }
+
+async function syncBatchWithRetry(cursor: string | undefined, batch: SyncMutation[], batchNumber: number, batchCount: number): Promise<SyncResponse> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_SYNC_ATTEMPTS; attempt += 1) {
+    const startedAt = performance.now();
+    try {
+      const response = await syncAccountLibrary(cursor, batch);
+      console.debug(`[BookStats sync] batch ${batchNumber}/${batchCount} attempt ${attempt}: ok in ${Math.round(performance.now() - startedAt)} ms; ${response.accepted} accepted, ${response.acknowledged?.length ?? 0} acknowledged, ${response.changes.length} pulled`);
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (!retryableSyncError(error) || attempt === MAX_SYNC_ATTEMPTS) throw error;
+      const exponential = RETRY_BASE_MS * 2 ** (attempt - 1);
+      const jitter = Math.round(exponential * (0.15 + Math.random() * 0.2));
+      const delay = exponential + jitter;
+      console.debug(`[BookStats sync] batch ${batchNumber}/${batchCount} attempt ${attempt} failed transiently; retrying in ${delay} ms`);
+      await sleep(delay);
+    }
+  }
+  throw lastError;
+}
+
+function retryableSyncError(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false;
+  return error.status === 0 || error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+}
+
+function sleep(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 async function ensureOutboxInitialized(repository: LibraryRepository, accountId: string): Promise<void> {
   const initializedKey = `cloudSyncOutboxInitialized:${accountId}`;

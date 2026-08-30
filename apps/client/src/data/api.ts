@@ -4,7 +4,7 @@ const TOKEN_KEY = "bookstats.authToken";
 const DEFAULT_API = "http://127.0.0.1:8787/api/v1";
 const UPDATE_REQUIRED_EVENT = "bookstats:update-required";
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message); this.name = "ApiError"; }
 }
 
@@ -148,7 +148,7 @@ export async function resetPassword(token: string, password: string, confirmPass
   return result;
 }
 export async function syncAccountLibrary(cursor: string | undefined, changes: SyncMutation[]): Promise<SyncResponse> {
-  return apiFetch<SyncResponse>("/sync", { method: "POST", body: JSON.stringify({ cursor, changes }) }, true);
+  return apiFetch<SyncResponse>("/sync", { method: "POST", body: JSON.stringify({ cursor, changes }), signal: AbortSignal.timeout(20_000) }, true);
 }
 
 export async function fetchCatalogCoverForInspection(coverUrl: string): Promise<Blob | undefined> {

@@ -1,6 +1,7 @@
 import type {
   BookFormat,
   MetadataCandidate,
+  MetadataCoverCandidate,
   MetadataField,
   MetadataProvider,
   MetadataSourceRef,
@@ -19,7 +20,7 @@ const GOOGLE_BOOKS_API = "https://www.googleapis.com/books/v1";
 const HARDCOVER_API = "https://api.hardcover.app/v1/graphql";
 const OPEN_LIBRARY_API = "https://openlibrary.org";
 
-const metadataUserAgent = () => process.env.BOOKSTATS_METADATA_USER_AGENT ?? "BookStats/1.1.1 (local-development)";
+const metadataUserAgent = () => process.env.BOOKSTATS_METADATA_USER_AGENT ?? "BookStats/1.2.5 (local-development)";
 const googleKey = () => process.env.BOOKSTATS_GOOGLE_BOOKS_API_KEY?.trim();
 const hardcoverToken = () => process.env.BOOKSTATS_HARDCOVER_API_TOKEN?.trim();
 
@@ -181,16 +182,25 @@ export function mergeCandidates(candidates: MetadataCandidate[], requestedIsbn?:
   const sortedEdition = sortProviders(nonEmpty, editionPriority);
   const sortedWork = sortProviders(nonEmpty, workPriority);
   const fieldSources: Partial<Record<MetadataField, MetadataProvider>> = {};
+  const fieldConfidence: Partial<Record<MetadataField, number>> = {};
   const choose = <K extends keyof MetadataCandidate>(field: K, list = sortedEdition): MetadataCandidate[K] | undefined => {
-    const found = list.find((candidate) => hasValue(candidate[field]));
-    if (found && metadataFieldNames.has(field as string)) fieldSources[field as MetadataField] = found.source === "aggregate" ? inferFieldProvider(found, field as MetadataField) : found.source;
+    const metadataField = metadataFieldNames.has(field as string) ? field as MetadataField : undefined;
+    const eligible = list.filter((candidate) => hasValue(candidate[field]));
+    const found = metadataField
+      ? [...eligible].sort((a, b) => fieldSelectionScore(b, metadataField, exactEdition) - fieldSelectionScore(a, metadataField, exactEdition))[0]
+      : eligible[0];
+    if (found && metadataField) {
+      fieldSources[metadataField] = found.source === "aggregate" ? inferFieldProvider(found, metadataField) : found.source;
+      fieldConfidence[metadataField] = confidenceForField(found, metadataField, exactEdition);
+    }
     return found?.[field];
   };
   const refs = dedupeRefs(nonEmpty.flatMap((candidate) => candidate.sourceRefs?.length ? candidate.sourceRefs : legacyRefs(candidate)));
-  const covers = uniqueStrings(sortedEdition.flatMap((candidate) => [...(candidate.coverUrls ?? []), ...(candidate.coverUrl ? [candidate.coverUrl] : [])]));
+  const coverEntries = dedupeCoverCandidates(sortedEdition.flatMap((candidate) => candidateCoverCandidates(candidate, exactEdition)));
+  const covers = coverEntries.map((entry) => entry.url);
   const subjects = uniqueStrings(sortedWork.flatMap((candidate) => candidate.subjects ?? [])).slice(0, 30);
   const allSeriesMemberships = dedupeSeriesMemberships(sortedWork.flatMap(candidateSeriesMemberships));
-  const seriesCandidate = sortedWork.find((candidate) => candidateSeriesMemberships(candidate).length > 0);
+  const seriesCandidate = [...sortedWork].filter((candidate) => candidateSeriesMemberships(candidate).length > 0).sort((a, b) => fieldSelectionScore(b, "series", exactEdition) - fieldSelectionScore(a, "series", exactEdition))[0];
   const candidatePrimaryMembership = seriesCandidate ? preferredSeriesMembership(seriesCandidate) : undefined;
   const matchingMemberships = candidatePrimaryMembership
     ? allSeriesMemberships.filter((membership) => sameSeriesName(membership.name, candidatePrimaryMembership.name))
@@ -212,8 +222,14 @@ export function mergeCandidates(candidates: MetadataCandidate[], requestedIsbn?:
   const seriesCatalogPosition = seriesMetadata?.books.find((book) => normalizeText(book.title) === normalizeText(title))?.position;
   const seriesVolume = primarySeriesMembership?.volume ?? seriesCatalogPosition;
   const seriesProvider = primarySeriesMembership?.provider ?? (seriesCandidate && seriesCandidate.source !== "aggregate" ? seriesCandidate.source : undefined);
-  if (seriesName && seriesProvider) fieldSources.series = seriesProvider;
-  if (seriesVolume && seriesProvider) fieldSources.seriesVolume = seriesProvider;
+  if (seriesName && seriesProvider) {
+    fieldSources.series = seriesProvider;
+    if (seriesCandidate) fieldConfidence.series = confidenceForField(seriesCandidate, "series", exactEdition);
+  }
+  if (seriesVolume && seriesProvider) {
+    fieldSources.seriesVolume = seriesProvider;
+    if (seriesCandidate) fieldConfidence.seriesVolume = confidenceForField(seriesCandidate, "seriesVolume", exactEdition);
+  }
   const seriesMemberships = primarySeriesMembership
     ? dedupeSeriesMemberships([
         { ...primarySeriesMembership, volume: seriesVolume },
@@ -221,12 +237,28 @@ export function mergeCandidates(candidates: MetadataCandidate[], requestedIsbn?:
       ])
     : allSeriesMemberships;
   const additionalAuthors = uniqueStrings(nonEmpty.flatMap((candidate) => candidate.additionalAuthors ?? []).filter((name) => normalizeText(name) !== normalizeText(author)));
-  const additionalAuthorSource = sortedWork.find((candidate) => candidate.additionalAuthors?.length);
-  if (additionalAuthorSource) fieldSources.additionalAuthors = additionalAuthorSource.source === "aggregate" ? inferFieldProvider(additionalAuthorSource, "additionalAuthors") : additionalAuthorSource.source;
-  const subjectSource = sortedWork.find((candidate) => candidate.subjects?.length);
-  if (subjectSource) fieldSources.genre = subjectSource.source === "aggregate" ? inferFieldProvider(subjectSource, "genre") : subjectSource.source;
-  if (isbn) fieldSources.isbn = sortedEdition.find((candidate) => candidate.isbn && isbnEquivalent(candidate.isbn, isbn))?.source ?? source;
-  if (covers[0]) fieldSources.coverUrl = nonEmpty.find((candidate) => candidate.coverUrl === covers[0] || candidate.coverUrls?.includes(covers[0]))?.source ?? source;
+  const additionalAuthorSource = [...sortedWork].filter((candidate) => candidate.additionalAuthors?.length).sort((a, b) => fieldSelectionScore(b, "additionalAuthors", exactEdition) - fieldSelectionScore(a, "additionalAuthors", exactEdition))[0];
+  if (additionalAuthorSource) {
+    fieldSources.additionalAuthors = additionalAuthorSource.source === "aggregate" ? inferFieldProvider(additionalAuthorSource, "additionalAuthors") : additionalAuthorSource.source;
+    fieldConfidence.additionalAuthors = confidenceForField(additionalAuthorSource, "additionalAuthors", exactEdition);
+  }
+  const subjectSource = [...sortedWork].filter((candidate) => candidate.subjects?.length).sort((a, b) => fieldSelectionScore(b, "genre", exactEdition) - fieldSelectionScore(a, "genre", exactEdition))[0];
+  if (subjectSource) {
+    fieldSources.genre = subjectSource.source === "aggregate" ? inferFieldProvider(subjectSource, "genre") : subjectSource.source;
+    fieldConfidence.genre = confidenceForField(subjectSource, "genre", exactEdition);
+  }
+  if (isbn) {
+    const isbnSource = sortedEdition.find((candidate) => candidate.isbn && isbnEquivalent(candidate.isbn, isbn));
+    fieldSources.isbn = isbnSource?.source ?? source;
+    if (isbnSource) fieldConfidence.isbn = confidenceForField(isbnSource, "isbn", exactEdition);
+  }
+  if (coverEntries[0]) {
+    // Preserve the exact provider/confidence attached to the winning URL. This matters once
+    // the client quality-ranks covers because the visually best cover is not necessarily the
+    // first URL from the aggregate candidate.
+    fieldSources.coverUrl = coverEntries[0].provider;
+    fieldConfidence.coverUrl = coverEntries[0].confidence;
+  }
 
   return {
     source,
@@ -253,13 +285,55 @@ export function mergeCandidates(candidates: MetadataCandidate[], requestedIsbn?:
     description: choose("description", sortedWork),
     coverUrl: covers[0],
     coverUrls: covers,
+    coverCandidates: coverEntries,
     sourceUrl: primary.sourceUrl,
-    fieldSources
+    fieldSources,
+    fieldConfidence
   };
 }
 
+function candidateCoverCandidates(candidate: MetadataCandidate, exactContext = false): MetadataCoverCandidate[] {
+  if (candidate.coverCandidates?.length) return candidate.coverCandidates.map((entry) => ({ ...entry }));
+  const provider = candidate.source === "aggregate" ? inferFieldProvider(candidate, "coverUrl") : candidate.source;
+  const confidence = confidenceForField(candidate, "coverUrl", exactContext);
+  return uniqueStrings([...(candidate.coverUrls ?? []), candidate.coverUrl]).map((url) => ({ url, provider, confidence, exactEdition: Boolean(candidate.exactEdition || candidate.matchType === "exact_isbn" || exactContext) }));
+}
+function dedupeCoverCandidates(entries: MetadataCoverCandidate[]): MetadataCoverCandidate[] {
+  const byUrl = new Map<string, MetadataCoverCandidate>();
+  for (const entry of entries) {
+    if (!entry.url?.trim()) continue;
+    const normalized = entry.url.trim();
+    const existing = byUrl.get(normalized);
+    if (!existing || entry.confidence > existing.confidence || (entry.exactEdition && !existing.exactEdition)) byUrl.set(normalized, { ...entry, url: normalized });
+  }
+  return [...byUrl.values()].sort((a, b) => Number(Boolean(b.exactEdition)) - Number(Boolean(a.exactEdition)) || b.confidence - a.confidence);
+}
 const metadataFieldNames = new Set<string>(["title", "author", "additionalAuthors", "isbn", "series", "seriesVolume", "publicationYear", "publisher", "language", "pages", "format", "genre", "description", "coverUrl"]);
 function inferFieldProvider(candidate: MetadataCandidate, field: MetadataField): MetadataProvider { return candidate.fieldSources?.[field] ?? candidate.source; }
+function confidenceForField(candidate: MetadataCandidate, field: MetadataField, exactContext = false): number {
+  const inherited = candidate.fieldConfidence?.[field];
+  if (inherited !== undefined) return Math.max(0, Math.min(100, Math.round(inherited)));
+  const provider = inferFieldProvider(candidate, field);
+  const providerReliability = fieldProviderReliability(provider, field);
+  const candidateConfidence = candidate.confidence ?? 60;
+  const matchBoost = candidate.matchType === "exact_isbn" || candidate.exactEdition || exactContext ? 7 : candidate.matchType === "edition" ? 3 : 0;
+  return Math.max(0, Math.min(100, Math.round(candidateConfidence * 0.55 + providerReliability * 0.45 + matchBoost)));
+}
+function fieldSelectionScore(candidate: MetadataCandidate, field: MetadataField, exactContext = false): number {
+  const confidence = confidenceForField(candidate, field, exactContext);
+  const editionBoost = candidate.matchType === "exact_isbn" || candidate.exactEdition ? 6 : candidate.matchType === "edition" ? 3 : 0;
+  return confidence * 10 + editionBoost;
+}
+function fieldProviderReliability(provider: MetadataProvider, field: MetadataField): number {
+  if (field === "series" || field === "seriesVolume") return provider === "hardcover" ? 98 : provider === "googlebooks" ? 91 : provider === "openlibrary" ? 78 : 84;
+  if (field === "isbn" || field === "publicationYear" || field === "publisher" || field === "pages" || field === "format" || field === "language") {
+    return provider === "googlebooks" ? 96 : provider === "hardcover" ? 91 : provider === "openlibrary" ? 86 : 88;
+  }
+  if (field === "description") return provider === "hardcover" ? 92 : provider === "googlebooks" ? 90 : provider === "openlibrary" ? 84 : 88;
+  if (field === "coverUrl") return provider === "googlebooks" ? 92 : provider === "hardcover" ? 90 : provider === "openlibrary" ? 87 : 89;
+  if (field === "genre") return provider === "hardcover" ? 90 : provider === "googlebooks" ? 88 : provider === "openlibrary" ? 84 : 86;
+  return provider === "hardcover" ? 95 : provider === "googlebooks" ? 94 : provider === "openlibrary" ? 90 : 92;
+}
 function sortProviders(candidates: MetadataCandidate[], priority: MetadataProvider[]): MetadataCandidate[] { return [...candidates].sort((a, b) => priority.indexOf(a.source) - priority.indexOf(b.source)); }
 function hasValue(value: unknown): boolean { return value !== undefined && value !== null && value !== "" && (!Array.isArray(value) || value.length > 0); }
 function uniqueStrings(values: Array<string | undefined | null>): string[] { return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))]; }
@@ -332,9 +406,16 @@ function applySeriesEnrichment(target: MetadataCandidate, enrichment: MetadataCa
     ...candidateSeriesMemberships(enrichment)
   ]);
   const fieldSources = { ...(target.fieldSources ?? {}) };
-  if (!target.series && series) fieldSources.series = enrichment.fieldSources?.series ?? enrichment.source;
-  if (!target.seriesVolume && seriesVolume) fieldSources.seriesVolume = enrichment.fieldSources?.seriesVolume ?? enrichment.source;
-  return { ...target, series, seriesVolume, seriesMetadata, seriesMemberships: seriesMemberships.length ? seriesMemberships : undefined, fieldSources };
+  const fieldConfidence = { ...(target.fieldConfidence ?? {}) };
+  if (!target.series && series) {
+    fieldSources.series = enrichment.fieldSources?.series ?? enrichment.source;
+    fieldConfidence.series = enrichment.fieldConfidence?.series ?? confidenceForField(enrichment, "series");
+  }
+  if (!target.seriesVolume && seriesVolume) {
+    fieldSources.seriesVolume = enrichment.fieldSources?.seriesVolume ?? enrichment.source;
+    fieldConfidence.seriesVolume = enrichment.fieldConfidence?.seriesVolume ?? confidenceForField(enrichment, "seriesVolume");
+  }
+  return { ...target, series, seriesVolume, seriesMetadata, seriesMemberships: seriesMemberships.length ? seriesMemberships : undefined, fieldSources, fieldConfidence };
 }
 function seriesNamesCompatible(left: string, right: string): boolean {
   const normalize = (value: string) => normalizeText(value).replace(/^the\s+/, "");

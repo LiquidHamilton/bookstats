@@ -1,33 +1,144 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Book } from "@bookstats/domain";
-import { AlertTriangle, BookOpen, CheckCircle2, GitMerge, HeartPulse, Search, Sparkles, X } from "lucide-react";
+import { AlertTriangle, BookOpen, CheckCircle2, Eye, EyeOff, GitMerge, HeartPulse, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { CoverImage } from "./CoverImage";
-import { findDuplicateGroups, libraryHealth, metadataIssues, type DuplicateGroup, type MetadataIssue } from "../data/cleanup";
+import { findDuplicateGroups, isMetadataIssueExemptable, libraryHealth, libraryMetadataIssueMap, METADATA_ISSUE_ORDER, type DuplicateGroup, type MetadataIssue } from "../data/cleanup";
+import { coverRecordRevision, inspectCoverRecord } from "../data/covers";
+import { loadCoverHealth, saveCoverHealth, type PersistedCoverHealthEntry } from "../data/coverHealth";
+import type { LibraryRepository } from "../data/libraryRepository";
+
+export type LibraryCleanupTab = "health" | "duplicates" | "metadata";
 
 interface Props {
   books: Book[];
   onMerge: (keep: Book, remove: Book[]) => Promise<void>;
   onMarkSeparate: (books: Book[]) => Promise<void>;
+  onSave: (book: Book) => Promise<void>;
   onOpen: (book: Book) => void;
   onEdit: (book: Book) => void;
   onClose: () => void;
+  repository?: LibraryRepository;
+  suspended?: boolean;
 }
 
-export function LibraryCleanup({ books, onMerge, onMarkSeparate, onOpen, onEdit, onClose }: Props) {
-  const [tab, setTab] = useState<"health" | "duplicates" | "metadata">("health");
+export function LibraryCleanup({ books, onMerge, onMarkSeparate, onSave, onOpen, onEdit, onClose, repository, suspended = false }: Props) {
+  const [tab, setTab] = useState<LibraryCleanupTab>("health");
   const [query, setQuery] = useState("");
-  const [issueFilter, setIssueFilter] = useState<MetadataIssue | "all">("all");
+  const [issueFilter, setIssueFilter] = useState<MetadataIssue | "all" | "ignored">("all");
   const [working, setWorking] = useState<string>();
   const [metadataLimit, setMetadataLimit] = useState(100);
   const [reviewGroup, setReviewGroup] = useState<DuplicateGroup>();
+  const [coverInspections, setCoverInspections] = useState<Map<string, PersistedCoverHealthEntry>>(new Map());
+  const [coverCacheReady, setCoverCacheReady] = useState(false);
+  const [coverRescanVersion, setCoverRescanVersion] = useState(0);
+  const [coverScan, setCoverScan] = useState({ done: 0, total: 0, running: false, full: false });
+  const forceCoverRescan = useRef(false);
+  const metadataFilterMounted = useRef(false);
   const duplicates = useMemo(() => findDuplicateGroups(books), [books]);
-  const health = useMemo(() => libraryHealth(books, duplicates.length), [books, duplicates.length]);
-  const incomplete = useMemo(() => books.map((book) => ({ book, issues: metadataIssues(book) })).filter((item) => item.issues.length > 0).sort((a, b) => b.issues.length - a.issues.length || a.book.title.localeCompare(b.book.title)), [books]);
+  const coverInspectionMap = useMemo(() => new Map([...coverInspections].map(([id, entry]) => [id, entry.inspection] as const)), [coverInspections]);
+  const issueMap = useMemo(() => libraryMetadataIssueMap(books, coverInspectionMap), [books, coverInspectionMap]);
+  const health = useMemo(() => libraryHealth(books, duplicates.length, issueMap), [books, duplicates.length, issueMap]);
+  const incomplete = useMemo(() => books.map((book) => ({ book, issues: issueMap.get(book.id) ?? [] })).filter((item) => item.issues.length > 0).sort((a, b) => b.issues.length - a.issues.length || a.book.title.localeCompare(b.book.title)), [books, issueMap]);
+  const ignored = useMemo(() => books.map((book) => ({
+    book,
+    issues: (book.healthExceptions ?? []).filter((issue): issue is MetadataIssue => METADATA_ISSUE_ORDER.includes(issue as MetadataIssue) && isMetadataIssueExemptable(issue as MetadataIssue))
+  })).filter((item) => item.issues.length > 0).sort((a, b) => b.issues.length - a.issues.length || a.book.title.localeCompare(b.book.title)), [books]);
   const needle = query.trim().toLocaleLowerCase();
-  const visibleIncomplete = incomplete.filter(({ book, issues }) => (issueFilter === "all" || issues.includes(issueFilter)) && (!needle || `${book.title} ${book.author} ${issues.join(" ")}`.toLocaleLowerCase().includes(needle)));
+  const sourceItems = issueFilter === "ignored" ? ignored : incomplete;
+  const visibleIncomplete = sourceItems.filter(({ book, issues }) => (issueFilter === "all" || issueFilter === "ignored" || issues.includes(issueFilter)) && (!needle || `${book.title} ${book.author} ${issues.join(" ")}`.toLocaleLowerCase().includes(needle)));
   const renderedIncomplete = visibleIncomplete.slice(0, metadataLimit);
+  const ignoredCheckCount = ignored.reduce((sum, item) => sum + item.issues.length, 0);
 
-  useEffect(() => { setMetadataLimit(100); }, [query, issueFilter]);
+  useEffect(() => {
+    if (!metadataFilterMounted.current) { metadataFilterMounted.current = true; return; }
+    setMetadataLimit(100);
+  }, [query, issueFilter]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCoverCacheReady(false);
+    if (!repository) { setCoverInspections(new Map()); setCoverCacheReady(true); return () => { cancelled = true; }; }
+    void loadCoverHealth(repository).then((stored) => {
+      if (cancelled) return;
+      setCoverInspections(stored);
+      setCoverCacheReady(true);
+    });
+    return () => { cancelled = true; };
+  }, [repository]);
+
+  useEffect(() => {
+    // Cover Health is incremental and persistent. Opening Library Health normally reloads
+    // the last verdicts and inspects only new/changed cover fields. A deliberate Recheck
+    // bypasses both the per-book verdict and the 30-day URL inspection cache.
+    const shouldInspectCovers = coverCacheReady && !suspended && (tab === "health" || (tab === "metadata" && (issueFilter === "all" || issueFilter === "Cover quality")));
+    if (!shouldInspectCovers) { setCoverScan((current) => ({ ...current, running: false })); return; }
+
+    let cancelled = false;
+    const candidates = books.filter((book) => Boolean(book.coverAssetId || book.coverUrl || book.cachedCoverDataUrl || book.coverSourceUrl));
+    const candidateIds = new Set(candidates.map((book) => book.id));
+    const fullRescan = forceCoverRescan.current;
+    forceCoverRescan.current = false;
+    const working = new Map([...coverInspections].filter(([bookId]) => candidateIds.has(bookId)));
+    const pending = fullRescan
+      ? candidates
+      : candidates.filter((book) => working.get(book.id)?.revision !== coverRecordRevision(book));
+
+    if (!pending.length) {
+      setCoverInspections(working);
+      setCoverScan({ done: candidates.length, total: candidates.length, running: false, full: false });
+      if (repository && working.size !== coverInspections.size) void saveCoverHealth(repository, working).catch(() => undefined);
+      return () => { cancelled = true; };
+    }
+
+    setCoverScan({ done: candidates.length - pending.length, total: candidates.length, running: true, full: fullRescan });
+    let next = 0;
+    let completed = candidates.length - pending.length;
+    let sincePersist = 0;
+
+    const persist = () => {
+      if (!repository) return;
+      void saveCoverHealth(repository, working).catch(() => undefined);
+      sincePersist = 0;
+    };
+
+    async function worker() {
+      while (!cancelled && next < pending.length) {
+        await yieldToUi();
+        if (cancelled) return;
+        const book = pending[next++];
+        const revision = coverRecordRevision(book);
+        const inspection = await inspectCoverRecord(book, fullRescan);
+        if (cancelled) return;
+        if (inspection) working.set(book.id, { revision, inspection, checkedAt: new Date().toISOString() });
+        else working.delete(book.id);
+        completed += 1;
+        sincePersist += 1;
+        if (completed % 12 === 0 || completed === candidates.length) {
+          setCoverInspections(new Map(working));
+          setCoverScan({ done: completed, total: candidates.length, running: completed < candidates.length, full: fullRescan });
+        }
+        if (sincePersist >= 12) persist();
+      }
+    }
+
+    void Promise.all(Array.from({ length: Math.min(2, Math.max(1, pending.length)) }, () => worker())).then(() => {
+      if (!cancelled) {
+        setCoverInspections(new Map(working));
+        setCoverScan({ done: candidates.length, total: candidates.length, running: false, full: false });
+        persist();
+      }
+    });
+    return () => {
+      cancelled = true;
+      // Persist the partial checkpoint so a large first-time scan resumes instead of restarting.
+      if (sincePersist > 0) persist();
+    };
+  }, [books, tab, issueFilter, suspended, coverCacheReady, coverRescanVersion]);
+
+  function recheckCovers() {
+    forceCoverRescan.current = true;
+    setCoverRescanVersion((version) => version + 1);
+  }
 
   async function merge(keep: Book, remove: Book[]) {
     const list = remove.map((book) => `“${book.title}”`).join(", ");
@@ -37,19 +148,31 @@ export function LibraryCleanup({ books, onMerge, onMarkSeparate, onOpen, onEdit,
   }
 
   function fixNext() {
+    if (issueFilter === "ignored") return;
     const next = visibleIncomplete[0] ?? incomplete[0];
     if (next) onEdit(next.book);
   }
 
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+  async function setHealthException(book: Book, issue: MetadataIssue, ignored: boolean) {
+    if (!isMetadataIssueExemptable(issue)) return;
+    const current = new Set(book.healthExceptions ?? []);
+    if (ignored) current.add(issue); else current.delete(issue);
+    const healthExceptions = [...current];
+    const key = `health:${book.id}:${issue}`;
+    setWorking(key);
+    try { await onSave({ ...book, healthExceptions: healthExceptions.length ? healthExceptions : undefined, updatedAt: new Date().toISOString() }); }
+    finally { setWorking(undefined); }
+  }
+
+  return <div className={`modal-backdrop ${suspended ? "cleanup-backdrop-suspended" : ""}`} onMouseDown={(event) => !suspended && event.target === event.currentTarget && onClose()}>
     <section className="cleanup-modal">
       <div className="form-header"><div><p className="eyebrow">Library intelligence</p><h2>Library health & cleanup</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={20} /></button></div>
       <div className="cleanup-tabs"><button className={tab === "health" ? "active" : ""} onClick={() => setTab("health")}><HeartPulse size={16} />Library health <span>{health.score}%</span></button><button className={tab === "metadata" ? "active" : ""} onClick={() => setTab("metadata")}><Sparkles size={16} />Metadata <span>{incomplete.length}</span></button><button className={tab === "duplicates" ? "active" : ""} onClick={() => setTab("duplicates")}><GitMerge size={16} />Duplicates <span>{duplicates.length}</span></button></div>
 
       {tab === "health" && <div className="cleanup-content">
-        <div className="health-hero"><div className="health-score-ring" style={{ "--health": `${health.score * 3.6}deg` } as CSSProperties}><div><strong>{health.score}%</strong><span>health</span></div></div><div><h3>{health.score >= 95 ? "Your library is in excellent shape" : health.score >= 80 ? "Your library is in good shape" : health.score >= 60 ? "There is useful cleanup to do" : "Your library has plenty of metadata to improve"}</h3><p>The score checks covers, descriptions, ISBNs, page counts and publication years for every book, plus series position when a book belongs to a series. It never judges ratings, reviews, notes or other personal choices.</p><button className="button primary" disabled={incomplete.length === 0} onClick={fixNext}><Sparkles size={16} />Repair next book</button></div></div>
-        <div className="health-metric-grid"><div><span>Incomplete books</span><strong>{health.incompleteBooks.toLocaleString()}</strong></div><div><span>Possible duplicate groups</span><strong>{health.duplicateGroups.toLocaleString()}</strong></div><div><span>Checks passed</span><strong>{health.passedChecks.toLocaleString()}</strong><small>of {health.totalChecks.toLocaleString()}</small></div></div>
-        <div className="health-issues"><div className="section-heading"><div><p className="eyebrow">Where to focus</p><h3>Missing metadata</h3></div></div>{health.issueCounts.length === 0 ? <div className="cleanup-empty"><CheckCircle2 size={34} /><h3>The Librarian Approves.</h3><p>Every applicable core metadata check currently passes. Your collection is suspiciously well organized.</p></div> : health.issueCounts.map(({ issue, count }) => { const percent = books.length ? Math.round((count / books.length) * 100) : 0; return <button key={issue} onClick={() => { setIssueFilter(issue); setTab("metadata"); }}><div><strong>{issue}</strong><span>{count.toLocaleString()} {count === 1 ? "book" : "books"}</span></div><div className="health-bar"><i style={{ width: `${Math.min(100, percent)}%` }} /></div><span>{percent}% missing</span></button>; })}</div>
+        <div className="health-hero"><div className="health-score-ring" style={{ "--health": `${health.score * 3.6}deg` } as CSSProperties}><div><strong>{health.score}%</strong><span>health</span></div></div><div><h3>{health.score >= 95 ? "Your library is in excellent shape" : health.score >= 80 ? "Your library is in good shape" : health.score >= 60 ? "There is useful cleanup to do" : "Your library has plenty of metadata to improve"}</h3><p>The score measures objective, applicable catalog integrity: cover quality, identifier validity, page/year sanity, reading-history consistency, series pairing and conflicting source IDs. Missing optional metadata can still be reviewed without lowering the score.</p><div className="health-hero-actions"><button className="button primary" disabled={incomplete.length === 0} onClick={fixNext}><Sparkles size={16} />Repair next book</button><button className="button secondary compact" disabled={!coverCacheReady || coverScan.running} onClick={recheckCovers} title="Deliberately inspect every current cover again"><RefreshCw size={15} />Recheck covers</button></div>{coverScan.running && <small>{coverScan.full ? "Rechecking" : "Checking changed"} cover quality… {coverScan.done.toLocaleString()} of {coverScan.total.toLocaleString()}</small>}</div></div>
+        <div className="health-metric-grid"><div><span>Books to review</span><strong>{health.booksToReview.toLocaleString()}</strong></div><div><span>Possible duplicate groups</span><strong>{health.duplicateGroups.toLocaleString()}</strong></div><div><span>Checks passed</span><strong>{health.passedChecks.toLocaleString()}</strong><small>of {health.totalChecks.toLocaleString()}</small></div></div>
+        <div className="health-issues"><div className="section-heading"><div><p className="eyebrow">Where to focus</p><h3>Metadata & consistency</h3></div></div>{health.issueCounts.length === 0 ? <div className="cleanup-empty"><CheckCircle2 size={34} /><h3>The Librarian Approves.</h3><p>Every applicable core metadata check currently passes. Your collection is suspiciously well organized.</p></div> : health.issueCounts.map(({ issue, count }) => { const percent = books.length ? Math.round((count / books.length) * 100) : 0; return <button key={issue} onClick={() => { setIssueFilter(issue); setTab("metadata"); }}><div><strong>{issue}</strong><span>{count.toLocaleString()} {count === 1 ? "book" : "books"}</span></div><div className="health-bar"><i style={{ width: `${Math.min(100, percent)}%` }} /></div><span>{percent}% affected</span></button>; })}</div>
       </div>}
 
       {tab === "duplicates" && <div className="cleanup-content">
@@ -58,13 +181,25 @@ export function LibraryCleanup({ books, onMerge, onMarkSeparate, onOpen, onEdit,
       </div>}
 
       {tab === "metadata" && <div className="cleanup-content">
-        <div className="cleanup-intro"><Sparkles size={18} /><p>Review missing catalog information one book at a time. Edit / repair now includes targeted “Fill missing metadata” and “Load catalog covers” actions, so you can repair blank fields without replacing metadata that is already correct. Exact ISBN matches remain edition-specific.</p></div>
-        <div className="metadata-filter-row"><div className="cleanup-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search books or missing fields…" /></div><select value={issueFilter} onChange={(event) => setIssueFilter(event.target.value as MetadataIssue | "all")}><option value="all">All missing fields</option>{["Cover", "Description", "ISBN", "Pages", "Publication year", "Series position"].map((issue) => <option key={issue} value={issue}>{issue}</option>)}</select><button className="button primary compact" disabled={visibleIncomplete.length === 0} onClick={fixNext}>Repair next</button></div>
-        {incomplete.length === 0 ? <div className="cleanup-empty"><CheckCircle2 size={34} /><h3>Metadata looks complete</h3><p>Every book has the core catalog fields BookStats checks here.</p></div> : visibleIncomplete.length === 0 ? <div className="cleanup-empty"><Search size={30} /><h3>No matching cleanup items</h3><p>Try another field filter or search.</p></div> : <><div className="metadata-cleanup-list">{renderedIncomplete.map(({ book, issues }) => <div className="metadata-cleanup-row" key={book.id}><MiniBook book={book} /><div className="issue-chips">{issues.map((issue) => <span key={issue}>{issue}</span>)}</div><div className="cleanup-row-actions"><button className="button secondary compact" onClick={() => onOpen(book)}>View</button><button className="button primary compact" onClick={() => onEdit(book)}>Edit / repair</button></div></div>)}</div>{renderedIncomplete.length < visibleIncomplete.length && <div className="library-load-more"><span>Showing {renderedIncomplete.length.toLocaleString()} of {visibleIncomplete.length.toLocaleString()} cleanup items</span><button className="button secondary compact" onClick={() => setMetadataLimit((limit) => Math.min(visibleIncomplete.length, limit + 100))}>Show 100 more</button></div>}</>}
+        <div className="cleanup-intro"><Sparkles size={18} /><p>Review missing or inconsistent catalog information one book at a time. Library Health also checks suspicious/broken covers, identifier conflicts, invalid values and reading-history consistency. Exact ISBN metadata repair remains edition-specific.</p></div>
+        <div className="metadata-filter-row"><div className="cleanup-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search books or issues…" /></div><select value={issueFilter === "ignored" ? "all" : issueFilter} onChange={(event) => setIssueFilter(event.target.value as MetadataIssue | "all")}><option value="all">All issues</option>{METADATA_ISSUE_ORDER.map((issue) => <option key={issue} value={issue}>{issue}</option>)}</select><div className="metadata-filter-actions"><button className={`button secondary compact ${issueFilter === "ignored" ? "active-filter" : ""}`} onClick={() => setIssueFilter((current) => current === "ignored" ? "all" : "ignored")}>{issueFilter === "ignored" ? <><EyeOff size={15} />Show active</> : <><Eye size={15} />Show ignored{ignoredCheckCount > 0 ? ` (${ignoredCheckCount})` : ""}</>}</button><button className="button primary compact" disabled={issueFilter === "ignored" || visibleIncomplete.length === 0} onClick={fixNext}>Repair next</button></div></div>
+        {issueFilter !== "ignored" && incomplete.length === 0 ? <div className="cleanup-empty"><CheckCircle2 size={34} /><h3>Metadata and consistency look good</h3><p>No current metadata or consistency issues were detected. Use Ignored checks to review saved exceptions.</p></div> : issueFilter === "ignored" && ignored.length === 0 ? <div className="cleanup-empty"><CheckCircle2 size={34} /><h3>No ignored checks</h3><p>You have not marked any Library Health cleanup items as intentional.</p></div> : visibleIncomplete.length === 0 ? <div className="cleanup-empty"><Search size={30} /><h3>No matching cleanup items</h3><p>Try another field filter or search.</p></div> : <><div className="metadata-cleanup-list">{renderedIncomplete.map(({ book, issues }) => <div className="metadata-cleanup-row" key={book.id}><MiniBook book={book} /><div className="issue-chips">{issues.map((issue) => <span className={`issue-chip ${issueFilter === "ignored" ? "issue-chip-ignored" : ""}`} key={issue}><b>{issue}</b>{issueFilter === "ignored" ? <button type="button" disabled={working === `health:${book.id}:${issue}`} onClick={() => void setHealthException(book, issue, false)}>Restore</button> : isMetadataIssueExemptable(issue) ? <button type="button" disabled={working === `health:${book.id}:${issue}`} onClick={() => void setHealthException(book, issue, true)}>Ignore</button> : null}</span>)}</div><div className="cleanup-row-actions"><button className="button secondary compact" onClick={() => onOpen(book)}>View</button>{issueFilter !== "ignored" && <button className="button primary compact" onClick={() => onEdit(book)}>Edit / repair</button>}</div></div>)}</div>{renderedIncomplete.length < visibleIncomplete.length && <div className="library-load-more"><span>Showing {renderedIncomplete.length.toLocaleString()} of {visibleIncomplete.length.toLocaleString()} cleanup items</span><button className="button secondary compact" onClick={() => setMetadataLimit((limit) => Math.min(visibleIncomplete.length, limit + 100))}>Show 100 more</button></div>}</>}
       </div>}
     </section>
-    {reviewGroup && <DuplicateReconcile group={reviewGroup} onClose={() => setReviewGroup(undefined)} onOpen={onOpen} onMerge={async (keep) => { await merge(keep, reviewGroup.books.filter((book) => book.id !== keep.id)); setReviewGroup(undefined); }} onMarkSeparate={async () => { await onMarkSeparate(reviewGroup.books); setReviewGroup(undefined); }} />}
+    {reviewGroup && <DuplicateReconcile group={reviewGroup} onClose={() => setReviewGroup(undefined)} onOpen={(book) => { setReviewGroup(undefined); onOpen(book); }} onMerge={async (keep) => { await merge(keep, reviewGroup.books.filter((book) => book.id !== keep.id)); setReviewGroup(undefined); }} onMarkSeparate={async () => { await onMarkSeparate(reviewGroup.books); setReviewGroup(undefined); }} />}
   </div>;
+}
+
+
+function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined") { resolve(); return; }
+    if ("requestIdleCallback" in window) {
+      (window as Window & { requestIdleCallback: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback(resolve, { timeout: 32 });
+      return;
+    }
+    globalThis.setTimeout(resolve, 0);
+  });
 }
 
 function DuplicateReconcile({ group, onClose, onOpen, onMerge, onMarkSeparate }: { group: DuplicateGroup; onClose: () => void; onOpen: (book: Book) => void; onMerge: (keep: Book) => Promise<void>; onMarkSeparate: () => Promise<void> }) {

@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Book, ReadingGoal, ReadingStatus, SeriesCompletionOverride, Shelf, UserAccount } from "@bookstats/domain";
 import { isSmartShelf, normalizedReadDates, READING_STATUS_LABELS, shelfMatchesBook } from "@bookstats/domain";
-import { ArrowDown, ArrowUp, ArrowUpDown, BarChart3, BookOpen, CheckSquare2, Cloud, Columns3, Filter, FolderOpen, Grid2X2, Handshake, Library, List, LogIn, MessageSquareText, Plus, RefreshCw, ScanLine, Search, Shuffle, SlidersHorizontal, Sparkles, UserPlus, UserRound, Wrench, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, BarChart3, BookOpen, CheckSquare2, ChevronDown, Cloud, Columns3, Filter, FolderOpen, Grid2X2, Handshake, Library, List, LogIn, MessageSquareText, Plus, RefreshCw, ScanLine, Search, Shuffle, SlidersHorizontal, Sparkles, UserPlus, UserRound, Wrench, X } from "lucide-react";
 import { checkServerCompatibility, currentAccount, deleteAccount as deleteCloudAccount, deleteCloudLibrary, logoutAccount, updateRequiredEventName } from "./data/api";
 import { useLibrary } from "./data/useLibrary";
 import { resetSyncCursor, synchronizeLibrary } from "./data/sync";
@@ -31,6 +31,7 @@ type View = "library" | "lending" | "statistics" | "tools" | "feedback" | "accou
 type StatusFilter = "all" | ReadingStatus;
 type SortKey = "title" | "author" | "series" | "status" | "shelves" | "rating" | "format" | "pages" | "reads" | "lastRead" | "owned";
 type SortDirection = "asc" | "desc";
+type CoverDensity = "compact" | "standard" | "large";
 const TABLE_COLUMNS: Array<{ key: SortKey; label: string }> = [
   { key: "title", label: "Title" }, { key: "author", label: "Author" }, { key: "series", label: "Series" }, { key: "status", label: "Status" }, { key: "shelves", label: "Shelves" },
   { key: "rating", label: "Rating" }, { key: "format", label: "Format" }, { key: "pages", label: "Pages" }, { key: "reads", label: "Reads" }, { key: "lastRead", label: "Last read" }, { key: "owned", label: "Owned" }
@@ -38,6 +39,7 @@ const TABLE_COLUMNS: Array<{ key: SortKey; label: string }> = [
 const DEFAULT_VISIBLE_COLUMNS = TABLE_COLUMNS.map((column) => column.key);
 const COLUMN_STORAGE_KEY = "bookstats.visibleTableColumns";
 const LAYOUT_STORAGE_KEY = "bookstats.libraryLayout";
+const COVER_DENSITY_STORAGE_KEY = "bookstats.coverDensity";
 const LIBRARY_RENDER_BATCH = 120;
 const ACCOUNT_WELCOME_STORAGE_KEY = "bookstats.accountWelcomeDismissed.v1";
 
@@ -61,6 +63,7 @@ export default function App() {
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [randomBook, setRandomBook] = useState<Book | null>(null);
   const [layout, setLayout] = useState<"grid" | "table">(loadLayout);
+  const [coverDensity, setCoverDensity] = useState<CoverDensity>(loadCoverDensity);
   const [visibleColumns, setVisibleColumns] = useState<SortKey[]>(loadVisibleColumns);
   const [sortKey, setSortKey] = useState<SortKey>("author");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -123,6 +126,7 @@ export default function App() {
   useEffect(() => { if (repository && account?.emailVerified) void performSync().catch(() => undefined); }, [repository, account?.id, account?.emailVerified]);
   useEffect(() => { localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(visibleColumns)); }, [visibleColumns]);
   useEffect(() => { localStorage.setItem(LAYOUT_STORAGE_KEY, layout); }, [layout]);
+  useEffect(() => { localStorage.setItem(COVER_DENSITY_STORAGE_KEY, coverDensity); }, [coverDensity]);
   useEffect(() => {
     if (!repository || loading) return;
     void createDailyBackupIfNeeded(repository, __BOOKSTATS_VERSION__, backupPreferences()).then(() => reloadSafetyData(repository)).catch(() => undefined);
@@ -184,7 +188,7 @@ export default function App() {
     };
   }, [selectedBook, filtered, books, sortKey, sortDirection, shelfNamesByBook]);
 
-  useEffect(() => { setRenderLimit(LIBRARY_RENDER_BATCH); }, [deferredQuery, statusFilter, shelfFilter, advancedFilter, sortKey, sortDirection, layout]);
+  useEffect(() => { setRenderLimit(LIBRARY_RENDER_BATCH); }, [deferredQuery, statusFilter, shelfFilter, advancedFilter, sortKey, sortDirection, layout, coverDensity]);
 
   async function reloadSafetyData(repo = repository) {
     if (!repo) return;
@@ -280,6 +284,17 @@ export default function App() {
   function changeSort(key: SortKey) { if (key === sortKey) setSortDirection((direction) => direction === "asc" ? "desc" : "asc"); else { setSortKey(key); setSortDirection(["title", "author", "series", "shelves"].includes(key) ? "asc" : "desc"); } }
   function toggleColumn(key: SortKey) { if (key === "title") return; setVisibleColumns((columns) => columns.includes(key) ? columns.filter((column) => column !== key) : DEFAULT_VISIBLE_COLUMNS.filter((column) => column === "title" || columns.includes(column) || column === key)); }
   function editFromDetail(book: Book) { setSelectedBookId(undefined); setEditing(book); }
+  function closeBookDetail() { setSelectedBookId(undefined); }
+  function closeBookForm() { setEditing(undefined); setNewBookIsbn(undefined); }
+  function openCleanupFresh() { setCleanupOpen(true); }
+  function closeCleanup() { setCleanupOpen(false); }
+  function openBookFromCleanup(book: Book) {
+    // Library Health remains mounted behind the drill-down dialog. Closing the book
+    // simply reveals the exact health context the user came from; there is no
+    // close/reopen handoff and therefore no orphaned backdrop state to clean up.
+    setSelectedBookId(book.id);
+  }
+  function editBookFromCleanup(book: Book) { setEditing(book); }
   function toggleSelected(book: Book, selected: boolean) { setSelectedIds((ids) => { const next = new Set(ids); if (selected) next.add(book.id); else next.delete(book.id); return next; }); }
   function exitSelectionMode() { setSelectionMode(false); setSelectedIds(new Set()); setBulkOpen(false); }
 
@@ -287,7 +302,7 @@ export default function App() {
     const portableBooks = items.map(({ cachedCoverDataUrl: _cache, ...book }) => book);
     const referencedShelfIds = new Set(items.flatMap((book) => book.shelfIds ?? []));
     const portableShelves = includeGoals ? shelves : shelves.filter((shelf) => isSmartShelf(shelf) || referencedShelfIds.has(shelf.id));
-    const payload = JSON.stringify({ format: "bookstats", version: 12, exportedAt: new Date().toISOString(), shelves: portableShelves, goals: includeGoals ? goals : [], books: portableBooks }, null, 2);
+    const payload = JSON.stringify({ format: "bookstats", version: 13, exportedAt: new Date().toISOString(), shelves: portableShelves, goals: includeGoals ? goals : [], books: portableBooks }, null, 2);
     const url = URL.createObjectURL(new Blob([payload], { type: "application/json" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${filename}-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); URL.revokeObjectURL(url);
   }
   function exportLibrary() { exportBooks(books, true, "bookstats-library"); }
@@ -366,6 +381,7 @@ export default function App() {
 
   function openSeriesInLibrary(seriesName: string) {
     setSelectedBookId(undefined);
+    setCleanupOpen(false);
     setQuery("");
     setStatusFilter("all");
     setShelfFilter("all");
@@ -399,26 +415,28 @@ export default function App() {
     <main className="main-content">
       {view === "library" && <>
         <header className="page-header"><div><p className="eyebrow">{shelfFilter === "all" ? "Your collection" : selectedShelf && isSmartShelf(selectedShelf) ? "Smart shelf" : "Shelf"}</p><h1>{shelfFilter === "all" ? "Library" : selectedShelf?.name ?? "Shelf"}</h1><p>{loading ? "Opening your library…" : books.length === 0 ? "Start building your library." : shelfFilter === "all" ? `${filtered.length} ${filtered.length === 1 ? "book" : "books"} in your collection.` : `${filtered.length} ${filtered.length === 1 ? "book" : "books"} ${selectedShelf && isSmartShelf(selectedShelf) ? "currently match this smart shelf." : "on this shelf."}`}</p></div><div className="page-header-actions"><button className="button secondary" onClick={() => setScannerOpen(true)}><ScanLine size={17} />Scan ISBN</button><button className="button primary" onClick={startManualAdd}><Plus size={18} />Add book</button></div></header>
-        <section className="toolbar"><div className="search-box"><Search size={18} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search title, author, series, shelf, ISBN, publisher, genre, condition or tag…" /></div><div className="filter-group"><SlidersHorizontal size={17} /><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}><option value="all">All statuses</option>{Object.entries(READING_STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div><div className="filter-group"><FolderOpen size={16} /><select value={shelfFilter} onChange={(event) => setShelfFilter(event.target.value)}><option value="all">All shelves</option>{shelves.map((shelf) => <option key={shelf.id} value={shelf.id}>{shelf.name}{isSmartShelf(shelf) ? " (Smart)" : ""}</option>)}</select></div><button className={`button secondary compact ${advancedFilter ? "active-filter" : ""}`} onClick={() => setFilterOpen(true)}><Filter size={16} />{advancedFilter ? "Advanced filter active" : "Advanced filters"}</button><button className="button secondary compact mobile-shelf-button" onClick={() => setManagingShelves(true)}><FolderOpen size={16} />Manage shelves</button>{layout === "table" && <ColumnPicker visible={visibleColumns} onToggle={toggleColumn} onReset={() => setVisibleColumns(DEFAULT_VISIBLE_COLUMNS)} />}<div className="layout-toggle" aria-label="Library layout"><button className={layout === "grid" ? "active" : ""} onClick={() => setLayout("grid")} title="Cover grid"><Grid2X2 size={16} /></button><button className={layout === "table" ? "active" : ""} onClick={() => setLayout("table")} title="Table"><List size={17} /></button></div><button className={`button secondary compact ${selectionMode ? "active-filter" : ""}`} onClick={() => selectionMode ? exitSelectionMode() : setSelectionMode(true)}><CheckSquare2 size={16} />{selectionMode ? "Done selecting" : "Select"}</button><button className="button secondary compact" onClick={pickRandom}><Shuffle size={17} />Pick a book</button></section>
+        <section className="toolbar"><div className="search-box"><Search size={18} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search title, author, series, shelf, ISBN, publisher, genre, condition or tag…" /></div><div className="filter-group"><SlidersHorizontal size={17} /><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}><option value="all">All statuses</option>{Object.entries(READING_STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div><div className="filter-group"><FolderOpen size={16} /><select value={shelfFilter} onChange={(event) => setShelfFilter(event.target.value)}><option value="all">All shelves</option>{shelves.map((shelf) => <option key={shelf.id} value={shelf.id}>{shelf.name}{isSmartShelf(shelf) ? " (Smart)" : ""}</option>)}</select></div><button className={`button secondary compact ${advancedFilter ? "active-filter" : ""}`} onClick={() => setFilterOpen(true)}><Filter size={16} />{advancedFilter ? "Advanced filter active" : "Advanced filters"}</button><button className="button secondary compact mobile-shelf-button" onClick={() => setManagingShelves(true)}><FolderOpen size={16} />Manage shelves</button>{layout === "table" && <ColumnPicker visible={visibleColumns} onToggle={toggleColumn} onReset={() => setVisibleColumns(DEFAULT_VISIBLE_COLUMNS)} />}<div className="layout-toggle cover-density-toggle" aria-label="Library layout"><div className={`cover-layout-split ${layout === "grid" ? "active" : ""}`}><button className="cover-layout-main" onClick={() => setLayout("grid")} title="Cover grid"><Grid2X2 size={16} /></button><details className="cover-density-picker"><summary title="Cover grid density" aria-label="Choose cover grid density"><ChevronDown size={12} /></summary><div className="cover-density-popover"><span>Cover view</span>{([['compact', 'Compact', 'Covers only'], ['standard', 'Standard', 'Current layout'], ['large', 'Large', 'Larger covers']] as const).map(([value, label, note]) => <button key={value} className={coverDensity === value ? "active" : ""} onClick={(event) => { setCoverDensity(value); setLayout("grid"); event.currentTarget.closest("details")?.removeAttribute("open"); }}><strong>{label}</strong><small>{note}</small></button>)}</div></details></div><button className={layout === "table" ? "active" : ""} onClick={() => setLayout("table")} title="Table"><List size={17} /></button></div><button className={`button secondary compact ${selectionMode ? "active-filter" : ""}`} onClick={() => selectionMode ? exitSelectionMode() : setSelectionMode(true)}><CheckSquare2 size={16} />{selectionMode ? "Done selecting" : "Select"}</button><button className="button secondary compact" onClick={pickRandom}><Shuffle size={17} />Pick a book</button></section>
         {advancedFilter && <div className="active-filter-banner"><Filter size={14} /><span>Advanced rules are filtering this view.</span><button onClick={() => setFilterOpen(true)}>Edit</button><button onClick={() => setAdvancedFilter(undefined)}><X size={13} />Clear</button></div>}
         {selectionMode && <div className="selection-toolbar"><div><CheckSquare2 size={16} /><strong>{selectedIds.size.toLocaleString()} selected</strong><span>of {filtered.length.toLocaleString()} visible</span></div><div><button className="button secondary compact" onClick={() => setSelectedIds(new Set(filtered.map((book) => book.id)))}>Select visible</button><button className="button secondary compact" disabled={selectedIds.size === 0} onClick={() => setSelectedIds(new Set())}>Clear</button><button className="button primary compact" disabled={selectedIds.size === 0} onClick={() => setBulkOpen(true)}>Bulk edit</button></div></div>}
         {randomBook && <section className="random-pick"><div><p className="eyebrow">From the current unread view</p><strong>{randomBook.title}</strong><span>{randomBook.author}</span></div><div className="random-pick-actions"><button className="button secondary compact" onClick={() => setSelectedBookId(randomBook.id)}>Open</button><button className="icon-button random-pick-close" type="button" onClick={() => setRandomBook(null)} aria-label="Dismiss random book"><X size={16} /></button></div></section>}
         {!loading && (filtered.length === 0 ? <section className="empty-state"><BookOpen size={44} /><h2>{books.length === 0 ? "Your library is empty" : "No books match"}</h2><p>{books.length === 0 ? "Add your first book manually or use the catalog lookup inside Add Book." : "Try adjusting your search, shelf, status, or advanced filter rules."}</p>{books.length === 0 && <div className="empty-state-actions"><button className="button secondary" onClick={() => setScannerOpen(true)}><ScanLine size={17} />Scan ISBN</button><button className="button primary" onClick={startManualAdd}><Plus size={18} />Add your first book</button></div>}</section> : <>
-          {layout === "grid" ? <section className="book-grid">{renderedBooks.map((book) => <BookCard key={book.id} book={book} shelfNames={shelfNamesByBook.get(book.id)} onOpen={(item) => setSelectedBookId(item.id)} onEdit={setEditing} onDelete={deleteBook} selectable={selectionMode} selected={selectedIds.has(book.id)} onSelect={toggleSelected} />)}</section> : <LibraryTable books={renderedBooks} shelfNamesByBook={shelfNamesByBook} visibleColumns={visibleColumns} sortKey={sortKey} sortDirection={sortDirection} onSort={changeSort} onOpen={(item) => setSelectedBookId(item.id)} onDelete={deleteBook} selectionMode={selectionMode} selectedIds={selectedIds} onSelect={toggleSelected} />}
+          {layout === "grid" ? <section className={`book-grid cover-density-${coverDensity}`}>{renderedBooks.map((book) => <BookCard key={book.id} book={book} density={coverDensity} shelfNames={shelfNamesByBook.get(book.id)} onOpen={(item) => setSelectedBookId(item.id)} onEdit={setEditing} onDelete={deleteBook} selectable={selectionMode} selected={selectedIds.has(book.id)} onSelect={toggleSelected} />)}</section> : <LibraryTable books={renderedBooks} shelfNamesByBook={shelfNamesByBook} visibleColumns={visibleColumns} sortKey={sortKey} sortDirection={sortDirection} onSort={changeSort} onOpen={(item) => setSelectedBookId(item.id)} onDelete={deleteBook} selectionMode={selectionMode} selectedIds={selectedIds} onSelect={toggleSelected} />}
           {renderedBooks.length < filtered.length && <div className="library-load-more"><span>Showing {renderedBooks.length.toLocaleString()} of {filtered.length.toLocaleString()} books</span><button className="button secondary" onClick={() => setRenderLimit((limit) => Math.min(filtered.length, limit + LIBRARY_RENDER_BATCH))}>Show {Math.min(LIBRARY_RENDER_BATCH, filtered.length - renderedBooks.length).toLocaleString()} more</button></div>}
         </>)}
       </>}
       {view === "lending" && <LendingView books={books} onSaveBook={saveBook} onOpenBook={(book) => setSelectedBookId(book.id)} />}
       {view === "statistics" && <StatisticsView books={books} shelves={shelves} goals={goals} onSaveGoal={saveGoal} onDeleteGoal={deleteGoal} onOpenSeries={openSeriesInLibrary} onSaveSeriesCompletion={saveSeriesCompletion} />}
-      {view === "tools" && <ToolsView bookCount={books.length} onExport={exportLibrary} onImport={importLibrary} onImportGoodreads={(file) => importExternal(file, "goodreads")} onImportLibraryThing={(file) => importExternal(file, "librarything")} onOpenCleanup={() => setCleanupOpen(true)} backups={backups} imports={importHistory} onCreateBackup={createManualBackup} onRestoreBackupFile={restoreBackupFile} onRestoreLocalBackup={restoreFromBackup} onDownloadBackup={downloadBackup} onDeleteBackup={deleteBackup} onUndoImport={undoImport} />}
+      {view === "tools" && <ToolsView bookCount={books.length} onExport={exportLibrary} onImport={importLibrary} onImportGoodreads={(file) => importExternal(file, "goodreads")} onImportLibraryThing={(file) => importExternal(file, "librarything")} onOpenCleanup={openCleanupFresh} backups={backups} imports={importHistory} onCreateBackup={createManualBackup} onRestoreBackupFile={restoreBackupFile} onRestoreLocalBackup={restoreFromBackup} onDownloadBackup={downloadBackup} onDeleteBackup={deleteBackup} onUndoImport={undoImport} />}
       {view === "feedback" && <FeedbackView account={account} storageKind={storageKind} bookCount={books.length} shelfCount={shelves.length} />}
       {view === "account" && <AccountView account={account} initialMode={accountEntryMode} storageKind={storageKind} syncing={syncing} lastSync={lastSync} syncError={syncError} onAccountChange={setAccount} onSync={performSync} onLogout={signOutAccount} onDeleteCloudData={removeCloudCopyAndDisconnect} onDeleteAccount={removeAccount} />}
     </main>
 
-    {selectedBook && <BookDetail book={selectedBook} shelves={shelves} onEdit={editFromDetail} onOpenSeries={openSeriesInLibrary} onPrevious={detailNavigation.previous ? () => setSelectedBookId(detailNavigation.previous!.id) : undefined} onNext={detailNavigation.next ? () => setSelectedBookId(detailNavigation.next!.id) : undefined} onClose={() => setSelectedBookId(undefined)} />}
-    {editing !== undefined && <BookForm book={editing ?? undefined} initialIsbn={editing === null ? newBookIsbn : undefined} autoLookupIsbn={Boolean(editing === null && newBookIsbn)} shelves={shelves} onCreateShelf={createShelf} onSave={saveBook} onClose={() => { setEditing(undefined); setNewBookIsbn(undefined); }} />}
+    {/* Keep Library Health mounted while drilling into a book. The later book dialog
+        naturally stacks above it; closing the child reveals Health in-place. */}
+    {cleanupOpen && <LibraryCleanup books={books} onMerge={mergeDuplicateRecords} onMarkSeparate={markDuplicateRecordsSeparate} onSave={saveBook} onOpen={openBookFromCleanup} onEdit={editBookFromCleanup} onClose={closeCleanup} repository={repository} suspended={Boolean(selectedBook || editing !== undefined)} />}
+    {selectedBook && <BookDetail book={selectedBook} shelves={shelves} onEdit={editFromDetail} onOpenSeries={openSeriesInLibrary} onPrevious={detailNavigation.previous ? () => setSelectedBookId(detailNavigation.previous!.id) : undefined} onNext={detailNavigation.next ? () => setSelectedBookId(detailNavigation.next!.id) : undefined} onClose={closeBookDetail} />}
+    {editing !== undefined && <BookForm book={editing ?? undefined} initialIsbn={editing === null ? newBookIsbn : undefined} autoLookupIsbn={Boolean(editing === null && newBookIsbn)} shelves={shelves} onCreateShelf={createShelf} onSave={saveBook} onClose={closeBookForm} />}
     {managingShelves && <ShelfManager books={books} shelves={shelves} onCreate={createShelf} onUpdate={updateShelf} onReorder={reorderShelves} onDelete={removeShelf} onClose={() => setManagingShelves(false)} />}
-    {cleanupOpen && <LibraryCleanup books={books} onMerge={mergeDuplicateRecords} onMarkSeparate={markDuplicateRecordsSeparate} onOpen={(book) => { setCleanupOpen(false); setSelectedBookId(book.id); }} onEdit={(book) => { setCleanupOpen(false); setEditing(book); }} onClose={() => setCleanupOpen(false)} />}
     {filterOpen && <AdvancedFilterPanel books={books} initial={advancedFilter} onApply={setAdvancedFilter} onSaveAsShelf={saveFilterAsShelf} onClose={() => setFilterOpen(false)} />}
     {bulkOpen && selectedBooks.length > 0 && <BulkEditPanel books={selectedBooks} shelves={shelves} onApply={applyBulkBooks} onDelete={deleteBulkBooks} onExport={(items) => exportBooks(items, false, "bookstats-selected")} onClose={() => setBulkOpen(false)} />}
     {importPlan && <ImportPreview plan={importPlan} onImport={commitImport} onCancel={() => setImportPlan(undefined)} />}
@@ -555,4 +573,10 @@ function seriesSortValue(book: Book): string | undefined { return book.series ? 
 function shelfSortValue(book: Book, shelfNamesByBook: Map<string, string[]>): string | undefined { const names = [...(shelfNamesByBook.get(book.id) ?? [])].sort(); return names.length ? names.join(" | ") : undefined; }
 function loadVisibleColumns(): SortKey[] { try { const parsed = JSON.parse(localStorage.getItem(COLUMN_STORAGE_KEY) ?? "null") as unknown; if (Array.isArray(parsed)) { const valid = parsed.filter((key): key is SortKey => DEFAULT_VISIBLE_COLUMNS.includes(key as SortKey)); return valid.includes("title") ? valid : ["title", ...valid]; } } catch { /* use defaults */ } return DEFAULT_VISIBLE_COLUMNS; }
 function loadLayout(): "grid" | "table" { try { return localStorage.getItem(LAYOUT_STORAGE_KEY) === "table" ? "table" : "grid"; } catch { return "grid"; } }
+function loadCoverDensity(): CoverDensity {
+  try {
+    const value = localStorage.getItem(COVER_DENSITY_STORAGE_KEY);
+    return value === "compact" || value === "large" ? value : "standard";
+  } catch { return "standard"; }
+}
 function formatRelativeSync(value: string): string { const delta = Date.now() - new Date(value).getTime(); if (!Number.isFinite(delta) || delta < 0) return "recently"; const minutes = Math.floor(delta / 60_000); if (minutes < 1) return "just now"; if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return new Date(value).toLocaleDateString(); }

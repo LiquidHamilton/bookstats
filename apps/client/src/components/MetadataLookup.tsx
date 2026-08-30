@@ -6,7 +6,7 @@ import { metadataDetails, searchMetadata } from "../data/api";
 interface Props {
   initialQuery?: string;
   autoSearch?: boolean;
-  onApply: (candidate: MetadataCandidate) => void;
+  onApply: (candidate: MetadataCandidate) => void | Promise<void>;
 }
 
 const providerLabels: Record<MetadataProvider, string> = {
@@ -49,7 +49,7 @@ export function MetadataLookup({ initialQuery = "", autoSearch = false, onApply 
       const details = await metadataDetails(candidate).catch(() => candidate);
       const coverUrl = details.coverUrl ?? candidate.coverUrl;
       const coverUrls = [...new Set([...(details.coverUrls ?? []), ...(candidate.coverUrls ?? []), ...(coverUrl ? [coverUrl] : [])])];
-      onApply({ ...candidate, ...details, coverUrl, coverUrls, subjects: details.subjects ?? candidate.subjects });
+      await onApply({ ...candidate, ...details, coverUrl, coverUrls, subjects: details.subjects ?? candidate.subjects });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load book details.");
     } finally { setLoading(false); }

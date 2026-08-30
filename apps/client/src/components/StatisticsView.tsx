@@ -29,7 +29,7 @@ import {
   statusDistribution,
   summarizeLibrary
 } from "@bookstats/statistics";
-import { BookOpen, ChartNoAxesCombined, CheckCircle2, Gauge, LibraryBig, Pencil, Plus, Star, Target, Trash2, UsersRound, X } from "lucide-react";
+import { BookOpen, ChartNoAxesCombined, CheckCircle2, Eye, EyeOff, Gauge, LibraryBig, Pencil, Plus, Search, Star, Target, Trash2, UsersRound, X } from "lucide-react";
 import { StatChart } from "./StatChart";
 import { SeriesCompletionEditor } from "./SeriesCompletionEditor";
 
@@ -64,6 +64,9 @@ export function StatisticsView({ books, shelves, goals, onSaveGoal, onDeleteGoal
   const [category, setCategory] = useState<StatsCategory>("overview");
   const [goalEditor, setGoalEditor] = useState<ReadingGoal | null | undefined>(undefined);
   const [seriesEditorName, setSeriesEditorName] = useState<string>();
+  const [seriesQuery, setSeriesQuery] = useState("");
+  const [showIgnoredSeries, setShowIgnoredSeries] = useState(false);
+  const [seriesActionWorking, setSeriesActionWorking] = useState<string>();
   const summary = useMemo(() => summarizeLibrary(books), [books]);
   const statusData = useMemo(() => statusDistribution(books), [books]);
   const ratingData = useMemo(() => ratingDistribution(books), [books]);
@@ -82,6 +85,12 @@ export function StatisticsView({ books, shelves, goals, onSaveGoal, onDeleteGoal
   const pace = useMemo(() => readingPaceSummary(books), [books]);
   const extremes = useMemo(() => readingExtremes(books), [books]);
   const series = useMemo(() => seriesProgress(books), [books]);
+  const trackedSeries = useMemo(() => series.filter((item) => !item.completionOverride?.ignoredFromTracking), [series]);
+  const ignoredSeries = useMemo(() => series.filter((item) => item.completionOverride?.ignoredFromTracking), [series]);
+  const visibleSeries = useMemo(() => {
+    const needle = seriesQuery.trim().toLocaleLowerCase();
+    return (showIgnoredSeries ? series : trackedSeries).filter((item) => !needle || item.name.toLocaleLowerCase().includes(needle));
+  }, [series, trackedSeries, showIgnoredSeries, seriesQuery]);
   const flow = useMemo(() => libraryFlowByYear(books), [books]);
   const newAuthors = useMemo(() => newAuthorsByYear(books), [books]);
   const ratingTrend = useMemo(() => ratingTrendByYear(books), [books]);
@@ -110,6 +119,22 @@ export function StatisticsView({ books, shelves, goals, onSaveGoal, onDeleteGoal
   const goalProgress = goals.map((goal) => ({ goal, progress: readingGoalProgress(goal, books) }));
   const activeGoals = goalProgress.filter(({ goal }) => goal.endDate >= new Date().toISOString().slice(0, 10));
   const completedGoals = goalProgress.filter(({ progress }) => progress.complete).length;
+
+  async function setSeriesIgnored(seriesName: string, ignored: boolean) {
+    const selected = series.find((item) => item.name === seriesName);
+    if (!selected) return;
+    const existing = selected.completionOverride;
+    const now = new Date().toISOString();
+    setSeriesActionWorking(seriesName);
+    try {
+      if (ignored) {
+        await onSaveSeriesCompletion(seriesName, { ...existing, ignoredFromTracking: true, updatedAt: now });
+      } else if (existing) {
+        const { ignoredFromTracking: _ignored, ...rules } = existing;
+        await onSaveSeriesCompletion(seriesName, hasSeriesCompletionRules(rules) ? { ...rules, updatedAt: now } : undefined);
+      }
+    } finally { setSeriesActionWorking(undefined); }
+  }
 
   return <>
     <header className="page-header"><div><p className="eyebrow">Explore your reading</p><h1>Statistics</h1><p>Simple at a glance, deep when you want it: goals, reading pace, collection trends, authors, series and ratings.</p></div></header>
@@ -183,18 +208,20 @@ export function StatisticsView({ books, shelves, goals, onSaveGoal, onDeleteGoal
 
     {category === "series" && <>
       <section className="metric-grid">
-        <Metric label="Series" value={series.length.toLocaleString()} note="Named series in your library" />
-        <Metric label="Complete collections" value={series.filter((item) => item.catalogTotal && item.missingCatalogBooks.length === 0 && item.catalogBooks.filter((entry) => entry.owned).length >= item.catalogTotal).length.toLocaleString()} note="Mainline series currently complete" />
-        <Metric label="Missing mainline books" value={series.reduce((sum, item) => sum + item.missingCatalogBooks.length, 0).toLocaleString()} note="After catalog cleanup and your overrides" />
-        <Metric label="Catalog-connected" value={series.filter((item) => item.catalogBooks.length > 0).length.toLocaleString()} note="Series with a completion checklist" />
+        <Metric label="Tracked series" value={trackedSeries.length.toLocaleString()} note={ignoredSeries.length ? `${ignoredSeries.length.toLocaleString()} ignored from completion tracking` : "Named series in your library"} />
+        <Metric label="Complete collections" value={trackedSeries.filter((item) => item.catalogTotal && item.missingCatalogBooks.length === 0 && item.catalogBooks.filter((entry) => entry.owned).length >= item.catalogTotal).length.toLocaleString()} note="Tracked mainline series currently complete" />
+        <Metric label="Missing mainline books" value={trackedSeries.reduce((sum, item) => sum + item.missingCatalogBooks.length, 0).toLocaleString()} note="Tracked series after catalog cleanup and overrides" />
+        <Metric label="Catalog-connected" value={trackedSeries.filter((item) => item.catalogBooks.length > 0).length.toLocaleString()} note="Tracked series with a completion checklist" />
       </section>
-      <section className="series-progress-list">{series.length === 0 ? <div className="stats-empty"><Gauge size={36} /><h2>No series yet</h2><p>Add series names and volume numbers to books and BookStats will track your collection and reading progress here.</p></div> : series.map((item) => {
+      <section className="series-list-toolbar"><div className="series-search"><Search size={16} /><input value={seriesQuery} onChange={(event) => setSeriesQuery(event.target.value)} placeholder="Search series…" /></div><button className={`button secondary compact ${showIgnoredSeries ? "active-filter" : ""}`} onClick={() => setShowIgnoredSeries((value) => !value)}>{showIgnoredSeries ? <EyeOff size={15} /> : <Eye size={15} />}{showIgnoredSeries ? "Hide ignored" : `Show ignored${ignoredSeries.length ? ` (${ignoredSeries.length})` : ""}`}</button></section>
+      <section className="series-progress-list">{series.length === 0 ? <div className="stats-empty"><Gauge size={36} /><h2>No series yet</h2><p>Add series names and volume numbers to books and BookStats will track your collection and reading progress here.</p></div> : visibleSeries.length === 0 ? <div className="stats-empty"><Search size={34} /><h2>No matching series</h2><p>{showIgnoredSeries ? "Try another search." : ignoredSeries.length ? "Try another search or show ignored series." : "Try another search."}</p></div> : visibleSeries.map((item) => {
         const collected = item.catalogBooks.filter((entry) => entry.owned).length;
         const target = item.catalogTotal ?? item.catalogBooks.length;
         const collectionComplete = Boolean(target && collected >= target && item.missingCatalogBooks.length === 0);
-        return <article key={item.name} className={`series-progress-card ${collectionComplete ? "series-collection-complete" : ""}`}><div className="series-progress-heading"><div><div className="series-title-line"><h3><button className="series-filter-link" onClick={() => onOpenSeries(item.name)} title={`Show only ${item.name} in Library`}>{item.name}</button></h3>{item.completionOverride && <span className="series-provider-badge">Custom completion</span>}</div><span>{item.read} read · {item.owned} owned · {item.total} in library</span></div><div className="series-heading-actions"><button className="button secondary compact" onClick={() => setSeriesEditorName(item.name)}>Edit completion</button><div className="series-percent"><strong>{Math.round(item.completionPercent)}%</strong><span>read</span></div></div></div><div className="detail-progress-track"><i style={{ width: `${item.completionPercent}%` }} /></div>{item.catalogBooks.length > 0 || item.catalogTotal ? <><div className="series-catalog-summary"><div><strong>{collected} of {target || item.catalogBooks.length}</strong><span>mainline positions collected</span></div>{typeof item.collectionPercent === "number" && <div className="series-collection-meter"><div className="detail-progress-track secondary"><i style={{ width: `${Math.min(100, item.collectionPercent)}%` }} /></div><span>{Math.round(item.collectionPercent)}% collected</span></div>}</div>{item.missingCatalogBooks.length > 0 ? <div className="series-missing-books"><span className="series-missing-label">Missing from your owned collection</span><div className="series-missing-list">{item.missingCatalogBooks.slice(0, 8).map((entry) => <span key={`${entry.providerId}:${entry.position ?? entry.title}`}>{entry.position ? <b>#{entry.position}</b> : null}{entry.title}</span>)}{item.missingCatalogBooks.length > 8 && <span>+{item.missingCatalogBooks.length - 8} more</span>}</div></div> : collectionComplete ? <div className="series-complete-note"><CheckCircle2 size={15} />Mainline collection complete.</div> : null}</> : <div className="series-volume-row">{item.knownVolumes.length > 0 ? <span>Known volumes: {item.knownVolumes.join(", ")}</span> : <span>Volume numbers not recorded</span>}{item.missingVolumeGaps.length > 0 && <span className="series-gap">Number gaps: {item.missingVolumeGaps.join(", ")}</span>}<button className="series-inline-edit" onClick={() => setSeriesEditorName(item.name)}>Set expected series size manually</button></div>}</article>;
+        const ignored = Boolean(item.completionOverride?.ignoredFromTracking);
+        return <article key={item.name} className={`series-progress-card ${collectionComplete && !ignored ? "series-collection-complete" : ""} ${ignored ? "series-tracking-ignored" : ""}`}><div className="series-progress-heading"><div><div className="series-title-line"><h3><button className="series-filter-link" onClick={() => onOpenSeries(item.name)} title={`Show only ${item.name} in Library`}>{item.name}</button></h3>{hasSeriesCompletionRules(item.completionOverride) && <span className="series-provider-badge">Custom completion</span>}{ignored && <span className="series-provider-badge series-ignored-badge">Ignored</span>}</div><span>{item.read} read · {item.owned} owned · {item.total} in library</span></div><div className="series-heading-actions"><button className="button secondary compact" onClick={() => setSeriesEditorName(item.name)}>Edit completion</button><button className="button secondary compact" disabled={seriesActionWorking === item.name} onClick={() => void setSeriesIgnored(item.name, !ignored)}>{ignored ? "Restore series" : "Ignore series"}</button><div className="series-percent"><strong>{Math.round(item.completionPercent)}%</strong><span>read</span></div></div></div><div className="detail-progress-track"><i style={{ width: `${item.completionPercent}%` }} /></div>{item.catalogBooks.length > 0 || item.catalogTotal ? <><div className="series-catalog-summary"><div><strong>{collected} of {target || item.catalogBooks.length}</strong><span>mainline positions collected</span></div>{typeof item.collectionPercent === "number" && <div className="series-collection-meter"><div className="detail-progress-track secondary"><i style={{ width: `${Math.min(100, item.collectionPercent)}%` }} /></div><span>{Math.round(item.collectionPercent)}% collected</span></div>}</div>{item.missingCatalogBooks.length > 0 ? <div className="series-missing-books"><span className="series-missing-label">Missing from your owned collection</span><div className="series-missing-list">{item.missingCatalogBooks.slice(0, 8).map((entry) => <span key={`${entry.providerId}:${entry.position ?? entry.title}`}>{entry.position ? <b>#{entry.position}</b> : null}{entry.title}</span>)}{item.missingCatalogBooks.length > 8 && <span>+{item.missingCatalogBooks.length - 8} more</span>}</div></div> : collectionComplete ? <div className="series-complete-note"><CheckCircle2 size={15} />Mainline collection complete.</div> : null}</> : <div className="series-volume-row">{item.knownVolumes.length > 0 ? <span>Known volumes: {item.knownVolumes.join(", ")}</span> : <span>Volume numbers not recorded</span>}{item.missingVolumeGaps.length > 0 && <span className="series-gap">Number gaps: {item.missingVolumeGaps.join(", ")}</span>}<button className="series-inline-edit" onClick={() => setSeriesEditorName(item.name)}>Set expected series size manually</button></div>}</article>;
       })}</section>
-      {series.length > 0 && <section className="chart-grid"><ChartPanel title="Largest series" subtitle="Books currently in your library"><HorizontalBar data={series.slice().sort((a, b) => b.total - a.total).slice(0, 15).map((item) => ({ name: item.name, value: item.total }))} /></ChartPanel><ChartPanel title="Reading completion" subtitle="Read percentage among series books already in your library"><HorizontalBar data={series.slice().sort((a, b) => b.completionPercent - a.completionPercent).slice(0, 15).map((item) => ({ name: item.name, value: Math.round(item.completionPercent) }))} valueFormatter={(value) => `${value}%`} /></ChartPanel></section>}
+      {trackedSeries.length > 0 && <section className="chart-grid"><ChartPanel title="Largest series" subtitle="Tracked books currently in your library"><HorizontalBar data={trackedSeries.slice().sort((a, b) => b.total - a.total).slice(0, 15).map((item) => ({ name: item.name, value: item.total }))} /></ChartPanel><ChartPanel title="Reading completion" subtitle="Read percentage among tracked series books already in your library"><HorizontalBar data={trackedSeries.slice().sort((a, b) => b.completionPercent - a.completionPercent).slice(0, 15).map((item) => ({ name: item.name, value: Math.round(item.completionPercent) }))} valueFormatter={(value) => `${value}%`} /></ChartPanel></section>}
     </>}
 
     {category === "ratings" && <>
@@ -205,6 +232,15 @@ export function StatisticsView({ books, shelves, goals, onSaveGoal, onDeleteGoal
     {goalEditor !== undefined && <GoalEditor goal={goalEditor ?? undefined} onSave={async (goal) => { await onSaveGoal(goal); setGoalEditor(undefined); }} onClose={() => setGoalEditor(undefined)} />}
     {seriesEditorName && (() => { const selected = series.find((item) => item.name === seriesEditorName); return selected ? <SeriesCompletionEditor series={selected} onSave={(override) => onSaveSeriesCompletion(selected.name, override)} onClose={() => setSeriesEditorName(undefined)} /> : null; })()}
   </>;
+}
+
+function hasSeriesCompletionRules(override?: SeriesCompletionOverride): boolean {
+  return Boolean(
+    override?.expectedCount
+    || override?.excludedProviderIds?.length
+    || override?.includedProviderIds?.length
+    || override?.manualBooks?.length
+  );
 }
 
 function GoalEditor({ goal, onSave, onClose }: { goal?: ReadingGoal; onSave: (goal: ReadingGoal) => Promise<void>; onClose: () => void }) {

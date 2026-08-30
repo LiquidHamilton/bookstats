@@ -1,5 +1,62 @@
 # Changelog
 
+## 1.2.5
+
+- Fixed the Cover View density dropdown being clipped by the layout toggle's overflow boundary, so Compact / Standard / Large can actually be selected.
+- Kept the density menu attached to the existing grid control without adding toolbar width or changing the selected density behavior.
+
+## 1.2.4
+
+- Made expensive Library Health cover inspection persistent and incremental. BookStats now stores a compact per-book cover verdict in the device-local repository and, on later Health opens, inspects only books whose cover-bearing fields are new or changed instead of rescanning the entire library. Partial first-time scans are checkpointed so large libraries resume rather than restart.
+- Added an explicit **Recheck covers** action for users who intentionally want a fresh full-library cover audit. A manual recheck bypasses the normal 30-day image-verdict cache, while ordinary Health opens continue to reuse saved results.
+- Kept cover-health invalidation precise: unrelated title, description, rating, reading-history or other metadata edits no longer cause a cover to be re-inspected. The lightweight cover revision avoids hashing full base64 image data when Health opens.
+- Improved ignored Library Health discoverability with a dedicated **Show ignored** / **Show active** control. Ignored checks remain excluded from the health denominator and can be restored individually.
+- Added Series-page search so large collections can quickly filter the visible series list without changing summary statistics.
+- Added persistent **Ignore series** / **Restore series** tracking. Ignoring a series leaves all book/series metadata intact but removes that series from Series completion summary metrics and charts. Ignored series can be revealed with **Show ignored** and restored at any time. The decision is stored in the existing synchronized series-completion override attached to the series books.
+- Added three Cover View density modes without adding another full-width toolbar control: **Compact** shows a dense cover-only bookshelf, **Standard** preserves the existing card layout, and **Large** uses larger covers with the same metadata as Standard. The choice lives in a small dropdown attached to the existing grid-view control and is remembered locally per device.
+- No PostgreSQL schema migration is required. Portable BookStats export format remains version 13; the optional series tracking flag already round-trips inside Book records.
+
+## 1.2.3
+
+- Reworked Library Health drill-down navigation so Health stays mounted underneath book View/Edit dialogs instead of closing and reconstructing itself. Closing or saving a book now reveals the exact Health context in place, eliminating the modal handoff that could leave the Tools page feeling blocked. While a child book dialog is open, the underlying Health backdrop is non-interactive and does not apply a second blur layer.
+- Fixed the apparent post-Health "freeze" caused by aggressive background cover inspection. Library Health now runs cover analysis cooperatively with two workers, yields between records, and stops scheduling work immediately when the Health view is no longer relevant or is closed.
+- Reduced synchronous work for locally cached data-URL covers by using a sampled cache fingerprint instead of hashing an entire potentially large base64 image string on every inspection-cache lookup.
+- Preserved intentional navigation away from Health: opening a series in the main Library closes Health rather than leaving a hidden cleanup layer behind.
+- No database or PostgreSQL migration is required.
+
+## 1.2.2
+
+- Fixed Library Health drill-down navigation so opening **View** or **Edit / repair** from the cleanup tool returns to Library Health instead of dropping back to the Tools page when the book dialog closes.
+- Preserved the active Library Health tab, issue filter, search text and loaded-list depth across the temporary book view/edit flow, so repairing a cover or metadata issue returns to the same cleanup context.
+- Kept edit-from-detail behavior consistent: a book opened from Library Health can be viewed, switched into Edit, saved or cancelled, and then returns to the originating cleanup context.
+- Prevented stale cleanup-return state when deliberately leaving a book detail for the main Library/series view or when opening/closing Library Health normally.
+- No database or PostgreSQL migration is required.
+
+## 1.2.1
+
+- Refined **Library Health** so 100% means there are no unresolved, applicable data-integrity problems rather than requiring every optional metadata field to be populated. Missing covers, descriptions, ISBNs, page counts and publication years remain visible cleanup opportunities but no longer reduce the health percentage by themselves.
+- Changed series-position checking to a contextual three-state model. A missing position is only considered unhealthy when BookStats has evidence that the series is actually ordered/numbered, using matching provider catalog positions and the user's existing books in that series. Umbrella collections and other non-sequential memberships can therefore remain fully healthy without invented volume numbers.
+- Made user-confirmed intentional duplicate decisions authoritative for Library Health as well as duplicate reconciliation. Reused source IDs no longer produce a health conflict when the affected records have already been explicitly marked as separate editions/copies.
+- Added per-book **Library Health exceptions** for legitimately non-applicable cleanup items such as unavailable covers, intentionally blank optional metadata, series positions, duplicate artwork and source-ID conflicts. Exceptions synchronize with the Book record and round-trip through existing exports/backups without a database migration.
+- Added a compact **Ignore** action directly on eligible cleanup chips plus an **Ignored checks** filter where saved exceptions can be reviewed and restored. Invalid ISBN/page/year values, broken series pairing, missing author data and inconsistent reading history remain non-exemptable integrity problems.
+- Changed the health denominator to count only checks that actually apply to each record. Validity checks are evaluated when the corresponding value exists; cover checks apply when a cover exists; series-position checks apply only when ordering is expected; user-confirmed exceptions are treated as not applicable.
+- Renamed the health summary's **Incomplete books** metric to **Books to review** to distinguish optional metadata cleanup from score-lowering integrity problems.
+- No PostgreSQL schema migration is required; the new exception list lives inside the existing synchronized Book JSON. Portable BookStats export format remains version 13 because the field is backward-compatible and already round-trips as part of each Book record.
+
+## 1.2.0
+
+- Made **Fill missing metadata** one complete asynchronous operation. Its loading state now stays active until metadata has been applied and any automatic cover discovery, validation, quality ranking and selection has definitively finished or failed.
+- Kept automatic metadata repair edition-safe for artwork. Existing ISBNs use exact-ISBN covers only; when a title/author lookup discovers an ISBN, BookStats performs an exact-ISBN cover lookup before completing the repair. Broader title/author artwork remains an explicit **Load catalog covers** action.
+- Accelerated catalog-cover processing with six-way bounded inspection concurrency, coalesced same-URL work, and a compact 30-day local inspection cache so previously validated artwork normally avoids another download/pixel-analysis pass.
+- Added quality ranking for usable covers based on resolution and cover-like proportions, plus an 8×8 perceptual hash to collapse near-identical artwork returned by multiple providers while retaining exact-ISBN-first ordering in the broader cover picker.
+- Expanded **Library Health** from missing-field checks into catalog-quality and consistency checks: suspicious/broken covers, exact cover reuse across unrelated books, ISBN checksum failures, invalid page/year values, series/position mismatches, missing authors, reading-history inconsistencies, and conflicting imported source IDs are now detected. Cover quality is inspected in the background using the same cached validator as the picker.
+- Added internal per-field metadata confidence. Provider selection now combines match confidence with field-specific provider reliability rather than relying on one static provider order, while retaining provider provenance for the chosen value and each cover candidate.
+- Hardened incremental sync with a 20-second request timeout and capped exponential retry/backoff with jitter for transient network, 408/425/429 and server failures. Permanent failures are not needlessly retried.
+- Added internal sync observability without adding frontend clutter: client diagnostics record batch size/bytes, attempt duration, acknowledgements and pulled records, while Fastify emits corresponding structured batch metrics and duration in server logs.
+- Bumped metadata-cache and PWA shell-cache generations so clients do not reuse pre-v1.2 aggregate metadata or static assets.
+- Advanced portable BookStats JSON exports to format version 13 so per-field metadata confidence round-trips explicitly with the rest of the catalog provenance data. Older exports remain importable.
+- No PostgreSQL schema migration is required; metadata confidence remains inside the existing synchronized Book JSON and cover-inspection verdicts are device-local cache data.
+
 ## 1.1.1
 
 - Fixed catalog-cover validation for providers that block browser-side image fetches with CORS. BookStats now asks its own API to safely retrieve candidate cover images for inspection, so the picker can actually examine the pixels instead of silently accepting uninspectable artwork.

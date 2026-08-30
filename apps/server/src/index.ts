@@ -9,7 +9,7 @@ import { emailConfigured, emailProvider, feedbackConfigured, sendFeedbackEmail, 
 import { registerAdminRoutes } from "./admin.js";
 import { archiveCoverForUser, fetchRemoteCoverForInspection, getCoverAssetByToken, listCoverAssetPathsForUser, readStoredCover, removeStoredCoverFiles } from "./covers.js";
 
-const APP_VERSION = "1.1.1";
+const APP_VERSION = "1.2.5";
 const MIN_CLIENT_VERSION = "1.0.1";
 const SESSION_DAYS = 30;
 const MIN_PASSWORD_LENGTH = 10;
@@ -387,6 +387,8 @@ app.post<{ Body: { token?: string; password?: string; confirmPassword?: string }
 });
 
 app.post<{ Body: { cursor?: string; changes?: SyncMutation[] } }>("/api/v1/sync", { preHandler: authenticate }, async (request, reply) => {
+  const syncStartedAt = performance.now();
+  const requestBytes = Number(request.headers["content-length"] ?? 0) || undefined;
   const db = requireDb(reply); if (!db || !request.bookstatsUser) return;
   if (!request.bookstatsUser.emailVerified) return reply.code(403).send({ error: "Verify your email address before enabling cloud synchronization." });
   const rawChanges = Array.isArray(request.body?.changes) ? request.body.changes.slice(0, 10_000) : [];
@@ -466,10 +468,20 @@ app.post<{ Body: { cursor?: string; changes?: SyncMutation[] } }>("/api/v1/sync"
         revision: Number(row.revision)
       };
     });
+    request.log.info({
+      sync: {
+        incomingRecords: rawChanges.length,
+        requestBytes,
+        accepted,
+        acknowledged: acknowledged.length,
+        pulled: records.length,
+        durationMs: Math.round(performance.now() - syncStartedAt)
+      }
+    }, "BookStats sync batch complete");
     return { cursor: serverCursor, changes: records, accepted, acknowledged };
   } catch (error) {
     await client.query("ROLLBACK");
-    request.log.error(error);
+    request.log.error({ error, sync: { incomingRecords: rawChanges.length, requestBytes, durationMs: Math.round(performance.now() - syncStartedAt) } }, "BookStats sync batch failed");
     return reply.code(500).send({ error: "Synchronization failed." });
   } finally { client.release(); }
 });
@@ -479,7 +491,7 @@ app.get<{ Querystring: { q?: string; isbn?: string } }>("/api/v1/metadata/search
   const isbn = request.query.isbn?.replace(/[^0-9Xx]/g, "").toUpperCase();
   if (!q && !isbn) return reply.code(400).send({ error: "Provide q or isbn." });
   const providerKey = metadataProviderStatuses().filter((provider) => provider.configured).map((provider) => provider.id).sort().join(",");
-  const cacheKey = `metadata-search-v5:${providerKey}:${isbn ? `isbn:${isbn}` : q!.toLowerCase()}`;
+  const cacheKey = `metadata-search-v6:${providerKey}:${isbn ? `isbn:${isbn}` : q!.toLowerCase()}`;
   const cached = await getCached<MetadataCandidate[]>(cacheKey);
   if (cached) return { results: cached, cached: true, providers: metadataProviderStatuses() };
   try {
@@ -497,7 +509,7 @@ app.post<{ Body: { candidate?: MetadataCandidate } }>("/api/v1/metadata/details"
   if (!candidate?.workId || !candidate.title) return reply.code(400).send({ error: "A metadata candidate is required." });
   const refs = candidate.sourceRefs?.map((ref) => `${ref.provider}:${ref.workId}:${ref.editionId ?? ""}`).sort().join("|") ?? `${candidate.source}:${candidate.workId}:${candidate.editionId ?? ""}`;
   const providerKey = metadataProviderStatuses().filter((provider) => provider.configured).map((provider) => provider.id).sort().join(",");
-  const cacheKey = `metadata-details-v5:${providerKey}:${candidate.exactEdition ? `exact:${candidate.isbn ?? ""}:` : ""}${refs}`;
+  const cacheKey = `metadata-details-v6:${providerKey}:${candidate.exactEdition ? `exact:${candidate.isbn ?? ""}:` : ""}${refs}`;
   const cached = await getCached<MetadataCandidate>(cacheKey);
   if (cached) return { details: cached, cached: true };
   try {

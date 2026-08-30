@@ -83,6 +83,12 @@ if (fs.existsSync(path.resolve('.env.example'))) {
   env = env.replace(/^BOOKSTATS_METADATA_USER_AGENT=BookStats\/[^ ]+/m, `BOOKSTATS_METADATA_USER_AGENT=BookStats/${version}`);
   write('.env.example', env);
 }
+
+if (fs.existsSync(path.resolve('apps/client/public/sw.js'))) {
+  let serviceWorker = read('apps/client/public/sw.js');
+  serviceWorker = serviceWorker.replace(/bookstats-shell-v\d+\.\d+\.\d+/g, `bookstats-shell-v${version}`);
+  write('apps/client/public/sw.js', serviceWorker);
+}
 NODE
 
 echo "BookStats version set to $VERSION"

@@ -224,4 +224,13 @@ describe("statistics", () => {
     expect(progress.missingCatalogBooks.map((entry) => entry.title)).toEqual(["Second", "Real Third"]);
   });
 
+  it("carries the user's series tracking decision with the series progress model", () => {
+    const source: Book[] = books.map((book) => ({
+      ...book,
+      seriesCompletionOverride: { ignoredFromTracking: true, updatedAt: "2026-08-30T12:00:00.000Z" }
+    }));
+    const progress = seriesProgress(source)[0];
+    expect(progress.completionOverride?.ignoredFromTracking).toBe(true);
+  });
+
 });

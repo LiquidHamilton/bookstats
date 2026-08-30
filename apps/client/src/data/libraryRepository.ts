@@ -68,6 +68,7 @@ function normalizeBook(book: Book): Book {
     shelfIds: book.shelfIds ?? [],
     loans: Array.isArray(book.loans) ? book.loans.map((loan) => ({ ...loan })) : undefined,
     duplicateIgnoreIds: Array.isArray(book.duplicateIgnoreIds) ? [...new Set(book.duplicateIgnoreIds.filter(Boolean))] : undefined,
+    healthExceptions: Array.isArray(book.healthExceptions) ? [...new Set(book.healthExceptions.filter(Boolean))] : undefined,
     seriesCompletionOverride: book.seriesCompletionOverride ? { ...book.seriesCompletionOverride, excludedProviderIds: [...(book.seriesCompletionOverride.excludedProviderIds ?? [])], includedProviderIds: [...(book.seriesCompletionOverride.includedProviderIds ?? [])], manualBooks: book.seriesCompletionOverride.manualBooks?.map((entry) => ({ ...entry })) } : undefined,
     readingSessions: Array.isArray(book.readingSessions) ? book.readingSessions.map((session) => ({ ...session })) : undefined,
     readDates: Array.isArray(book.readDates) ? book.readDates : (book.dateRead ? [book.dateRead] : [])

@@ -77,6 +77,7 @@ export function BookForm({ book, initialIsbn, autoLookupIsbn = false, shelves, o
   const [metadataMatchType, setMetadataMatchType] = useState<MetadataMatchType | undefined>(book?.metadataMatchType);
   const [metadataSourceRefs, setMetadataSourceRefs] = useState<MetadataSourceRef[]>(book?.metadataSourceRefs ?? []);
   const [metadataSources, setMetadataSources] = useState<Partial<Record<MetadataField, MetadataProvider>>>(book?.metadataSources ?? {});
+  const [metadataConfidence, setMetadataConfidence] = useState<Partial<Record<MetadataField, number>>>(book?.metadataConfidence ?? {});
   const [seriesMetadata, setSeriesMetadata] = useState<SeriesMetadata | undefined>(book?.seriesMetadata);
   const [seriesCompletionOverride, setSeriesCompletionOverride] = useState<SeriesCompletionOverride | undefined>(book?.seriesCompletionOverride);
   const [catalogAction, setCatalogAction] = useState<"covers" | "missing">();
@@ -92,6 +93,12 @@ export function BookForm({ book, initialIsbn, autoLookupIsbn = false, shelves, o
   function clearMetadataSource(field: MetadataField) {
     setMetadataSources((current) => {
       if (!current[field]) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+    setMetadataConfidence((current) => {
+      if (current[field] === undefined) return current;
       const next = { ...current };
       delete next[field];
       return next;
@@ -220,7 +227,7 @@ export function BookForm({ book, initialIsbn, autoLookupIsbn = false, shelves, o
     return applied;
   }
 
-  function applyBlankMetadata(candidate: MetadataCandidate): MetadataField[] {
+  async function applyBlankMetadata(candidate: MetadataCandidate, coverChoicesOverride?: string[], coverProvenanceCandidate: MetadataCandidate = candidate): Promise<{ applied: MetadataField[]; coverCount: number }> {
     const applied = new Set<MetadataField>();
     const apply = (field: MetadataField, currentValue: unknown, candidateValue: unknown, setter: (value: any) => void) => {
       if (hasMetadataValue(currentValue) || !hasMetadataValue(candidateValue)) return;
@@ -248,30 +255,51 @@ export function BookForm({ book, initialIsbn, autoLookupIsbn = false, shelves, o
       applied.add("genre");
     }
 
-    const coverChoices = [...new Set([...(candidate.coverUrls ?? []), ...(candidate.coverUrl ? [candidate.coverUrl] : [])])];
-    if (coverChoices.length) {
-      void filterUsableCoverUrls(coverChoices).then((usable) => {
-        setCoverOptions(usable);
-        if (!hasCurrentCover && usable[0]) {
-          selectCover(usable[0], false);
-          const provider = candidate.fieldSources?.coverUrl;
-          if (provider) setMetadataSources((current) => ({ ...current, coverUrl: provider }));
-        }
-      });
+    // Cover validation is part of the logical metadata operation in v1.2. The caller does
+    // not become idle until exact-edition cover discovery, validation, ranking and selection
+    // have either completed or found nothing usable.
+    const coverChoices = coverChoicesOverride ?? [...new Set([...(candidate.coverUrls ?? []), ...(candidate.coverUrl ? [candidate.coverUrl] : [])])];
+    const usable = coverChoices.length ? await filterUsableCoverUrls(coverChoices) : [];
+    if (usable.length) {
+      setCoverOptions(usable);
+      if (!hasCurrentCover && usable[0]) {
+        selectCover(usable[0], false);
+        const coverMetadata = coverProvenanceCandidate.coverCandidates?.find((entry) => entry.url === usable[0]);
+        const provider = coverMetadata?.provider ?? coverProvenanceCandidate.fieldSources?.coverUrl;
+        if (provider) setMetadataSources((current) => ({ ...current, coverUrl: provider }));
+        const confidence = coverMetadata?.confidence ?? coverProvenanceCandidate.fieldConfidence?.coverUrl;
+        if (confidence !== undefined) setMetadataConfidence((current) => ({ ...current, coverUrl: confidence }));
+        applied.add("coverUrl");
+      }
+    } else if (coverChoices.length) {
+      setCoverOptions([]);
     }
+
     setMetadataSources((current) => {
       const next = { ...current };
       for (const field of applied) {
+        // Cover provenance was assigned from the exact URL-specific cover candidate above.
+        // Do not replace it with the aggregate metadata record's generic cover source.
+        if (field === "coverUrl") continue;
         const provider = candidate.fieldSources?.[field];
         if (provider) next[field] = provider;
       }
       return next;
     });
-    return [...applied];
+    setMetadataConfidence((current) => {
+      const next = { ...current };
+      for (const field of applied) {
+        if (field === "coverUrl") continue;
+        const confidence = candidate.fieldConfidence?.[field];
+        if (confidence !== undefined) next[field] = confidence;
+      }
+      return next;
+    });
+    return { applied: [...applied], coverCount: usable.length };
   }
 
-  function applyMetadata(candidate: MetadataCandidate) {
-    applyBlankMetadata(candidate);
+  async function applyMetadata(candidate: MetadataCandidate) {
+    await applyBlankMetadata(candidate);
     setMetadataSource(candidate.source);
     setMetadataWorkId(candidate.workId);
     setMetadataEditionId(candidate.editionId);
@@ -370,18 +398,48 @@ export function BookForm({ book, initialIsbn, autoLookupIsbn = false, shelves, o
         throw new Error("No sufficiently close title/author match was found. Use the full catalog search above to choose the correct book manually.");
       }
       const candidate = await metadataDetails(lookup.candidates[0]).catch(() => lookup.candidates[0]);
-      const applied = applyBlankMetadata(candidate);
+
+      // Keep automatic artwork edition-specific whenever an ISBN is known. A title/author
+      // lookup may discover the ISBN during this same operation; in that case run a second,
+      // exact-ISBN cover lookup before declaring the action complete. Broader alternate-edition
+      // artwork remains an explicit "Load catalog covers" action.
+      const coverIsbn = isbnLike(isbn.trim()) ? isbn.trim() : (isbnLike(candidate.isbn ?? "") ? candidate.isbn! : "");
+      let automaticCoverChoices: string[];
+      let coverProvenanceCandidate = candidate;
+      if (coverIsbn) {
+        if (lookup.exactIsbn && candidate.exactEdition) {
+          // The metadata request we just completed is already the exact-ISBN aggregate;
+          // reuse it instead of repeating the same provider/details round trip.
+          coverProvenanceCandidate = candidate;
+        } else {
+          const exactCandidates = await searchMetadata(coverIsbn, true);
+          if (exactCandidates.length) coverProvenanceCandidate = await metadataDetails(exactCandidates[0]).catch(() => exactCandidates[0]);
+          else coverProvenanceCandidate = { ...candidate, coverUrl: undefined, coverUrls: [], coverCandidates: [] };
+        }
+        // Pass the raw exact-edition candidates into applyBlankMetadata. That function owns
+        // validation/ranking, so each URL is inspected only once per logical repair action.
+        automaticCoverChoices = [...new Set([...(coverProvenanceCandidate.coverUrls ?? []), ...(coverProvenanceCandidate.coverUrl ? [coverProvenanceCandidate.coverUrl] : [])])];
+      } else {
+        automaticCoverChoices = [...new Set([...(candidate.coverUrls ?? []), ...(candidate.coverUrl ? [candidate.coverUrl] : [])])];
+      }
+
+      const { applied, coverCount } = await applyBlankMetadata(candidate, automaticCoverChoices, coverProvenanceCandidate);
       setMetadataSource(candidate.source);
       setMetadataWorkId(candidate.workId);
       setMetadataEditionId(candidate.editionId);
       setMetadataMatchType(candidate.matchType);
       setMetadataSourceRefs(candidate.sourceRefs ?? []);
-      const urls = [...new Set([...(candidate.coverUrls ?? []), ...(candidate.coverUrl ? [candidate.coverUrl] : [])])];
       const labels: Partial<Record<MetadataField, string>> = { title: "title", author: "author", additionalAuthors: "additional authors", isbn: "ISBN", series: "series", seriesVolume: "series position", pages: "pages", publicationYear: "publication year", publisher: "publisher", language: "language", format: "format", description: "description", genre: "genre", coverUrl: "cover" };
-      setCatalogMessage(applied.length ? `Filled ${applied.map((field) => labels[field] ?? field).join(", ")}. Existing values were left untouched.${urls.length ? " Cover choices were loaded too." : ""}` : urls.length ? "No blank catalog fields could be filled, but cover choices were loaded." : "No additional missing metadata was available from the matched catalog record.");
+      const nonCoverFields = applied.filter((field) => field !== "coverUrl");
+      setCatalogMessage(nonCoverFields.length
+        ? `Filled ${nonCoverFields.map((field) => labels[field] ?? field).join(", ")}. Existing values were left untouched.${coverCount ? " Exact-edition cover choices are ready too." : ""}`
+        : coverCount
+          ? "No blank catalog fields needed changes, but exact-edition cover choices are ready."
+          : "No additional missing metadata or usable edition-specific cover was available from the matched catalog record.");
     } catch (error) { setCatalogError(error instanceof Error ? error.message : "Could not fill missing metadata."); }
     finally { setCatalogAction(undefined); }
   }
+
 
 
   function addReadingSession(completed = false) {
@@ -518,10 +576,12 @@ export function BookForm({ book, initialIsbn, autoLookupIsbn = false, shelves, o
         metadataMatchType,
         metadataSourceRefs,
         metadataSources,
+        metadataConfidence,
         seriesMetadata,
         seriesCompletionOverride,
         loans: book?.loans,
         duplicateIgnoreIds: book?.duplicateIgnoreIds,
+        healthExceptions: book?.healthExceptions,
         sourceIds: book?.sourceIds,
         dateAdded: book?.dateAdded ?? now,
         readingSessions: normalizedSessions,

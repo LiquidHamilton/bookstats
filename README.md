@@ -2,7 +2,7 @@
 
 BookStats is a local-first personal library manager and reading-statistics application built primarily for the web, with optional Windows and macOS desktop packaging through Tauri. It is a ground-up TypeScript/React rewrite of the earlier Python BookStats prototype.
 
-**Current version:** `1.1.1` — incremental cloud synchronization, safer retry batching, and cleaner catalog cover selection
+**Current version:** `1.2.5` — Cover View density dropdown hotfix
 
 ## Mobile Home Screen app
 
@@ -81,7 +81,7 @@ The **Lending** view records who currently has an owned book, when it was loaned
 
 **Scan ISBN** opens the camera and reads common book barcodes. A successful ISBN immediately opens Add Book with that identifier prefilled and triggers the existing edition-first metadata lookup. BookStats uses the browser's native barcode detector when present and lazily loads ZXing when it is not, so scanning can work on a wider range of browsers without increasing the normal startup bundle. Camera access is requested only after the user opens the scanner.
 
-**Statistics → Series** treats collection completion as an owned-mainline question. Provider feeds sometimes contain many translated or alternate work records; BookStats uses the known primary-book count and numeric series positions to collapse those variants to one likely representative per mainline position. When automatic data is still wrong, **Edit completion** lets the user set the expected count, include/exclude catalog entries, add a missing manual entry, or reset to automatic detection. The UI intentionally does not expose provider branding in this completion workflow—the important result is the sequence the user considers canonical.
+**Statistics → Series** treats collection completion as an owned-mainline question. Provider feeds sometimes contain many translated or alternate work records; BookStats uses the known primary-book count and numeric series positions to collapse those variants to one likely representative per mainline position. When automatic data is still wrong, **Edit completion** lets the user set the expected count, include/exclude catalog entries, add a missing manual entry, or reset to automatic detection. The page also supports name search plus **Ignore series** / **Restore series** for umbrella or otherwise irrelevant series memberships. Ignored series keep their underlying book metadata but are excluded from completion summary metrics and charts until restored. The UI intentionally does not expose provider branding in this completion workflow—the important result is the sequence the user considers canonical.
 
 ### Administration
 
@@ -111,14 +111,18 @@ The Add/Edit Book window has one unified catalog search for ISBN, title, or titl
 
 Title/author search is broader and can return multiple editions. Results from the providers are normalized, deduplicated and ranked by query relevance before provider confidence, so exact-title matches stay ahead of box sets/omnibuses and relevant Open Library editions are not crowded out by higher-confidence providers. BookStats then merges useful fields with field-level provenance. Exact ISBN matches receive the strongest confidence; fuzzy title matches never become exact-edition records automatically.
 
-Catalog-managed fields remain editable and use simple blank-only refill behavior. Metadata lookup and targeted repair fill fields that are empty and leave any field that already contains data untouched. Clearing a catalog field makes it eligible to be filled on the next lookup; there is no separate saved-field or manual-override state. Provider references and per-field provenance are still retained for diagnostics and future refresh work.
+Catalog-managed fields remain editable and use simple blank-only refill behavior. Metadata lookup and targeted repair fill fields that are empty and leave any field that already contains data untouched. Clearing a catalog field makes it eligible to be filled on the next lookup; there is no separate saved-field or manual-override state. Provider references are retained per field, and v1.2 also stores an internal field-confidence score derived from match quality and provider reliability. That confidence is deliberately an implementation detail rather than extra UI clutter.
 
-Alternate covers are aggregated across the available providers and presented in one cover picker. Exact-ISBN artwork is shown first and title/author edition alternatives follow. Once a signed-in user chooses a cover, BookStats archives the selected image on its own server so the library does not permanently depend on a third-party cover URL.
+**Fill missing metadata remains edition-safe from beginning to end.** When the current record already has an ISBN, automatic cover discovery uses only that exact ISBN. If a title/author metadata lookup discovers an ISBN during the same operation, BookStats performs an exact-ISBN cover lookup before the action completes. The loading state remains active through metadata application, cover retrieval, cover validation, ranking and final selection. It never silently broadens an automatic repair to another edition just because that edition has more attractive artwork.
+
+**Load catalog covers is the explicit broader-artwork action.** It keeps exact-ISBN artwork first when available, then deliberately adds title/author matches from likely alternate editions. Choosing one of those covers changes only the artwork; it does not change the record's ISBN or other edition metadata. Candidates are quality-ranked and near-duplicate artwork is collapsed before the picker is shown. Once a signed-in user chooses a cover, BookStats archives the selected image on its own server so the library does not permanently depend on a third-party cover URL.
 
 
 ### Covers
 
-BookStats supports catalog/URL covers, alternate catalog cover selection, and user-selected local image files. Local uploads are resized before storage. Every device still keeps a local cover cache when possible, but verified accounts now also have a durable server-side cover archive. The display priority is the device-local cache, then the definitive BookStats archive, then the retained original source as a graceful fallback if either cached layer is temporarily unavailable. The original external URL remains provenance and a repair/re-archival source when it is still available.
+BookStats supports catalog/URL covers, alternate catalog cover selection, and user-selected local image files. Local uploads are resized before storage. Catalog candidates pass through a quality pipeline that rejects suspicious placeholder URLs, invalid/non-image responses, tiny images, implausible cover proportions, nearly blank white tiles and common grayscale “Image Not Available” cards. Usable candidates are ranked by resolution and cover-like aspect ratio, then an 8×8 perceptual hash removes near-identical artwork returned by different providers. Inspection work is concurrency-limited, concurrent requests for the same URL are coalesced, and compact inspection verdicts are cached locally for 30 days so previously checked covers usually do not need to be downloaded and analyzed again.
+
+Every device still keeps a local cover cache when possible, but verified accounts now also have a durable server-side cover archive. The display priority is the device-local cache, then the definitive BookStats archive, then the retained original source as a graceful fallback if either cached layer is temporarily unavailable. The original external URL remains provenance and a repair/re-archival source when it is still available.
 
 Cloud cover images live as files under BookStats server storage while PostgreSQL stores ownership, content hash, MIME/size metadata, provenance, and an opaque access token. Custom uploaded images are archived the same way and are removed from synchronized JSON after archival succeeds. Users without an account remain fully local-first: their custom image data and remote cover cache stay on that browser/desktop until an account is available.
 
@@ -149,7 +153,7 @@ Backups preserve reading sessions and cover references but omit passwords, accou
 
 ### Library intelligence
 
-The cleanup tool now includes a **Library Health** score based only on objective metadata completeness: covers, descriptions, ISBNs, page counts, publication years and series positions where applicable. Personal choices such as ratings, reviews and notes never lower the score. The same tool retains user-reviewed duplicate merging.
+The cleanup tool includes a **Library Health** score based only on objective, applicable catalog-integrity checks. Missing optional metadata such as covers, descriptions, ISBNs, page counts or publication years remains visible as a cleanup opportunity but does not lower the score by itself. ISBN/page/year validity checks apply when those values exist; cover-quality checks apply when a cover exists; series positions are required only when provider/library evidence indicates an ordered series. Umbrella collections can therefore remain healthy without invented volume numbers. User-confirmed separate editions/copies suppress matching source-ID conflicts, and eligible checks can be marked intentional through a per-book health exception. A visible **Show ignored** control lets those exceptions be reviewed and restored later. Invalid values, broken series pairing, missing author data and inconsistent reading history remain non-exemptable integrity problems. Cover-bearing records use persistent device-local inspection results: Health checks only new or changed covers during normal use, checkpoints partial large-library scans, and offers **Recheck covers** for a deliberate fresh audit. Personal choices such as ratings, reviews and notes never lower the score. The same tool retains user-reviewed duplicate merging.
 
 Statistics also include series progress, monthly/yearly reading and page trends, reading pace, formats and genres read, new-to-you authors by year, rating trends and current owned/unowned reading breakdowns. Series collection completion focuses on the likely mainline sequence: BookStats collapses alternate-language/edition catalog rows that repeat the same numbered positions and can reject wildly inflated catalog totals when the numbered data strongly supports a smaller sequence. The Series page shows owned and missing mainline titles without exposing provider branding. **Edit completion** lets the user set the expected count, include/exclude catalog entries, add an omitted title manually, or reset to automatic detection. If no usable catalog checklist is available, BookStats falls back to conservative numeric-gap behavior rather than inventing titles.
 
@@ -363,7 +367,7 @@ Configure at least:
 BOOKSTATS_HOST=127.0.0.1
 BOOKSTATS_PORT=8787
 DATABASE_URL=postgresql://bookstats:YOUR_PASSWORD@127.0.0.1:5432/bookstats
-BOOKSTATS_METADATA_USER_AGENT=BookStats/1.1.1 (your-real-contact@example.com)
+BOOKSTATS_METADATA_USER_AGENT=BookStats/1.2.5 (your-real-contact@example.com)
 # Optional but recommended for the full v0.9 metadata stack:
 BOOKSTATS_GOOGLE_BOOKS_API_KEY=your_google_books_api_key
 BOOKSTATS_HARDCOVER_API_TOKEN=your_hardcover_api_token
@@ -491,11 +495,13 @@ npx tauri icon public/bookstats-icon.png
 
 ## Current sync design
 
-BookStats v1.1 uses an incremental per-record outbox on each device. Saving a book, shelf, or reading goal updates one compact local outbox entry; repeated edits to the same record replace that entry with its latest timestamp instead of adding duplicate work. Deletions continue to use durable tombstones. A normal one-book edit therefore uploads that book record rather than rebuilding an upload from the complete library.
+BookStats uses an incremental per-record outbox on each device. Saving a book, shelf, or reading goal updates one compact local outbox entry; repeated edits to the same record replace that entry with its latest timestamp instead of adding duplicate work. Deletions continue to use durable tombstones. A normal one-book edit therefore uploads that book record rather than rebuilding an upload from the complete library.
 
 Large backlogs are split into bounded requests of at most 100 records and approximately 900 KiB. The server returns explicit acknowledgements for newly accepted mutations as well as safe retries that it has already applied or superseded, so the client can clear only the exact outbox/tombstone entries that are durably accounted for. The server cursor is saved after every successful batch; any later failed batch simply remains queued locally. Pull-only sync requests still run when the device has no local edits so changes made on other devices arrive normally.
 
-The v1.1 upgrade seeds the outbox once from records newer than the device's last successful v1.0.x sync timestamp. That preserves unsynced offline edits without forcing an already-synchronized multi-thousand-book library through the network again. Sync implementation details remain internal; the Account UI intentionally stays simple.
+v1.2 hardens that protocol without adding user-facing bookkeeping. A sync request has a bounded timeout, transient network/HTTP failures use capped exponential backoff with jitter, and permanent failures are surfaced immediately rather than pointlessly retried. Client diagnostics record batch record/byte counts, attempts, duration, acknowledgements and pulls in the developer console; Fastify records matching structured batch telemetry in the server log. The Account UI intentionally remains simple.
+
+The v1.1 upgrade bootstrap still seeds the outbox once from records newer than the device's last successful v1.0.x sync timestamp. That preserves unsynced offline edits without forcing an already-synchronized multi-thousand-book library through the network again.
 
 Each synchronized item is still stored as a complete BookStats record in PostgreSQL JSONB. Synchronization is incremental at the record level rather than field-diff level: editing one book sends one book, not one field and not the whole library. Newer local saves/deletes are protected from older in-flight server responses. Notes/review field-level conflict UI remains a later hardening task.
 
@@ -509,7 +515,7 @@ For this development milestone, the client stores its bearer session token in lo
 
 Open Library is always available as the no-key fallback. Google Books and Hardcover are optional server-side enrichments configured with `BOOKSTATS_GOOGLE_BOOKS_API_KEY` and `BOOKSTATS_HARDCOVER_API_TOKEN`. The keys/tokens are read only by Fastify and are never emitted into the Vite/browser bundle.
 
-BookStats uses the providers by field rather than treating one catalog as globally authoritative. In general, exact edition facts prefer an exact Google Books/Hardcover/Open Library edition match, while work/series relationships prefer Hardcover, then Google Books, then Open Library. Covers are pooled for user selection. If a provider is unavailable, the other configured providers continue to work.
+BookStats uses the providers by field rather than treating one catalog as globally authoritative. v1.2 scores each candidate field using both match confidence and field-specific provider reliability: edition facts such as ISBN/publisher/pages favor strong edition matches, while work/series relationships favor Hardcover's relationship data. The chosen provider and confidence are preserved with the Book record for diagnostics and future refresh decisions. Cover candidates likewise carry provider, exact-edition and confidence provenance before client-side image quality ranking. If a provider is unavailable, the other configured providers continue to work.
 
 For a deployed server, set `BOOKSTATS_METADATA_USER_AGENT` to include a real contact address for Open Library. The server caches human-triggered lookup responses in PostgreSQL when available. Hardcover requests are spaced to stay comfortably below its public API rate limit.
 

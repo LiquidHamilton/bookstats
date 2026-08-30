@@ -1,4 +1,4 @@
-# BookStats Server Setup (v1.0.3)
+# BookStats Server Setup (v1.2.1)
 
 BookStats uses one public site and one private local API process:
 
@@ -20,7 +20,7 @@ The production `/opt/bookstats/.env` should contain at least:
 BOOKSTATS_HOST=127.0.0.1
 BOOKSTATS_PORT=8790
 DATABASE_URL=postgresql://bookstats:CHANGE_ME@127.0.0.1:5432/bookstats
-BOOKSTATS_METADATA_USER_AGENT=BookStats/1.1.1 (your-real-contact@example.com)
+BOOKSTATS_METADATA_USER_AGENT=BookStats/1.2.5 (your-real-contact@example.com)
 BOOKSTATS_CORS_ORIGIN=https://kylecarroll.com,tauri://localhost,http://tauri.localhost
 # HTTP(S) origins automatically allow their matching www/non-www counterpart.
 BOOKSTATS_PUBLIC_URL=https://kylecarroll.com/bookstats/
@@ -33,7 +33,7 @@ BOOKSTATS_HARDCOVER_API_TOKEN=your_hardcover_api_token
 
 ### Metadata providers — Google Books + Hardcover
 
-Open Library works without credentials and remains the fallback provider. For the full v0.9 lookup stack, configure Google Books and Hardcover on the API server:
+Open Library works without credentials and remains the fallback provider. For the full multi-provider lookup stack, configure Google Books and Hardcover on the API server:
 
 1. In Google Cloud Console, enable the **Books API** for a project.
 2. Create an API key and restrict it to the Books API where practical.
@@ -191,7 +191,7 @@ location ^~ /bookstats/ {
 
 Adjust `8790` if `BOOKSTATS_PORT` uses another local port.
 
-The `25m` request limit is an emergency ceiling, not the expected sync size. BookStats v1.1 keeps a persistent local outbox and normally sends only changed records in batches capped at roughly 900 KiB and 100 records. Retaining a larger reverse-proxy ceiling protects unusual single records and upgrade/recovery cases without making normal edits large transfers.
+The `25m` request limit is an emergency ceiling, not the expected sync size. BookStats keeps a persistent local outbox and normally sends only changed records in batches capped at roughly 900 KiB and 100 records. v1.2 also applies bounded client timeouts plus capped exponential retry/backoff for transient failures and records structured batch telemetry server-side. Retaining a larger reverse-proxy ceiling protects unusual single records and upgrade/recovery cases without making normal edits large transfers.
 
 ## systemd
 
@@ -231,8 +231,8 @@ sudo systemctl enable --now bookstats
 Local `export.sh` produces matching server/web ZIPs:
 
 ```text
-BookStats-Web-v1.1.1.zip
-BookStats-Server-v1.1.1.zip
+BookStats-Web-v1.2.5.zip
+BookStats-Server-v1.2.5.zip
 ```
 
 A signed desktop build also produces a deployment wrapper such as:
